@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Financial News Summarizer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Financial News Summarizer</h1>
+            <p>Analyze and summarize financial news articles</p>
+        </header>
+
+        <main>
+            <!-- Login Section -->
+            <section id="login-section" class="card">
+                <h2>Login (Optional)</h2>
+                <form id="login-form">
+                    <input type="text" id="username" placeholder="Username" />
+                    <input type="password" id="password" placeholder="Password" />
+                    <button type="submit">Login</button>
+                </form>
+                <p id="login-status"></p>
+            </section>
+
+            <!-- Single Article Section -->
+            <section class="card">
+                <h2>Summarize Single Article</h2>
+                <form id="single-article-form">
+                    <input type="url" id="article-url" placeholder="Enter article URL" required />
+                    <button type="submit">Fetch & Summarize</button>
+                </form>
+                <div id="single-result" class="result-container"></div>
+            </section>
+
+            <!-- Batch Processing Section -->
+            <section class="card">
+                <h2>Batch Process Multiple Articles</h2>
+                <form id="batch-form">
+                    <textarea id="batch-urls" rows="5" placeholder="Enter URLs, one per line"></textarea>
+                    <button type="submit">Process All</button>
+                </form>
+                <div id="batch-results" class="result-container"></div>
+            </section>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
