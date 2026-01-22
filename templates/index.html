@@ -3,48 +3,183 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Financial News Summarizer</title>
+    <title>Financial News Agent - Analyst Dashboard</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
     <div class="container">
-        <header>
-            <h1>Financial News Summarizer</h1>
-            <p>Analyze and summarize financial news articles</p>
-        </header>
-
-        <main>
-            <!-- Login Section -->
-            <section id="login-section" class="card">
-                <h2>Login (Optional)</h2>
+        <!-- Login Screen -->
+        <div id="login-screen">
+            <div class="login-card">
+                <h1>Financial News Agent</h1>
+                <p>Automated intelligence briefings for analysts</p>
                 <form id="login-form">
-                    <input type="text" id="username" placeholder="Username" />
-                    <input type="password" id="password" placeholder="Password" />
+                    <input type="text" id="username" placeholder="Username" required />
+                    <input type="password" id="password" placeholder="Password" required />
                     <button type="submit">Login</button>
                 </form>
                 <p id="login-status"></p>
-            </section>
+            </div>
+        </div>
 
-            <!-- Single Article Section -->
-            <section class="card">
-                <h2>Summarize Single Article</h2>
-                <form id="single-article-form">
-                    <input type="url" id="article-url" placeholder="Enter article URL" required />
-                    <button type="submit">Fetch & Summarize</button>
-                </form>
-                <div id="single-result" class="result-container"></div>
-            </section>
+        <!-- Main Dashboard (hidden until login) -->
+        <div id="dashboard" style="display: none;">
+            <header>
+                <h1>Analyst Dashboard</h1>
+                <div class="header-actions">
+                    <span id="analyst-name">Welcome, Analyst</span>
+                    <button id="logout-btn" class="btn-secondary">Logout</button>
+                </div>
+            </header>
 
-            <!-- Batch Processing Section -->
-            <section class="card">
-                <h2>Batch Process Multiple Articles</h2>
-                <form id="batch-form">
-                    <textarea id="batch-urls" rows="5" placeholder="Enter URLs, one per line"></textarea>
-                    <button type="submit">Process All</button>
-                </form>
-                <div id="batch-results" class="result-container"></div>
-            </section>
-        </main>
+            <nav class="tabs">
+                <button class="tab-btn active" data-tab="coverage">Coverage</button>
+                <button class="tab-btn" data-tab="sources">Sources</button>
+                <button class="tab-btn" data-tab="themes">Themes</button>
+                <button class="tab-btn" data-tab="settings">Settings</button>
+            </nav>
+
+            <!-- Tab 1: Coverage (Tickers) -->
+            <div id="coverage-tab" class="tab-content active">
+                <div class="card">
+                    <h2>Ticker Coverage</h2>
+                    <p class="description">Add tickers you're covering to filter relevant content</p>
+
+                    <form id="ticker-form" class="input-group">
+                        <input type="text" id="ticker-input" placeholder="Enter ticker (e.g., NVDA)" />
+                        <button type="submit">Add Ticker</button>
+                    </form>
+
+                    <div id="ticker-list" class="item-list">
+                        <!-- Tickers will be populated here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 2: Sources -->
+            <div id="sources-tab" class="tab-content">
+                <div class="card">
+                    <h2>Content Sources</h2>
+                    <p class="description">Manage your information sources and access credentials</p>
+
+                    <!-- Sell-Side Research -->
+                    <div class="source-section">
+                        <h3>Sell-Side Research</h3>
+                        <form id="sellside-form" class="source-form">
+                            <select id="sellside-bank" required>
+                                <option value="">Select Bank</option>
+                                <option value="jpmorgan">JP Morgan</option>
+                                <option value="goldmansachs">Goldman Sachs</option>
+                                <option value="morganstanley">Morgan Stanley</option>
+                                <option value="bofa">Bank of America</option>
+                                <option value="other">Other</option>
+                            </select>
+                            <input type="text" id="sellside-portal-url" placeholder="Portal URL" required />
+                            <input type="text" id="sellside-username" placeholder="Username" required />
+                            <input type="password" id="sellside-password" placeholder="Password" required />
+                            <button type="submit">Add Sell-Side Source</button>
+                        </form>
+                        <div id="sellside-list" class="item-list">
+                            <!-- Sell-side sources will be listed here -->
+                        </div>
+                    </div>
+
+                    <!-- Substack -->
+                    <div class="source-section">
+                        <h3>Substack Authors</h3>
+                        <form id="substack-form" class="source-form">
+                            <input type="text" id="substack-name" placeholder="Author Name" required />
+                            <input type="url" id="substack-url" placeholder="Substack URL" required />
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="substack-has-rss" />
+                                Has RSS Feed
+                            </label>
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="substack-requires-login" />
+                                Requires Login
+                            </label>
+                            <button type="submit">Add Substack Source</button>
+                        </form>
+                        <div id="substack-list" class="item-list">
+                            <!-- Substack sources will be listed here -->
+                        </div>
+                    </div>
+
+                    <!-- Social Media (Phase 2) -->
+                    <div class="source-section disabled">
+                        <h3>Social Media <span class="badge">Coming Soon</span></h3>
+                        <p class="disabled-text">Twitter/X, YouTube, and Podcasts will be available in Phase 2</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 3: Themes -->
+            <div id="themes-tab" class="tab-content">
+                <div class="card">
+                    <h2>Investment Themes</h2>
+                    <p class="description">Define investment theses and themes to track across all sources</p>
+
+                    <form id="theme-form" class="theme-form">
+                        <input type="text" id="theme-name" placeholder="Theme Name (e.g., AI Infrastructure Buildout)" required />
+                        <textarea id="theme-keywords" rows="3" placeholder="Keywords (comma-separated): data center, GPU, inference, training" required></textarea>
+                        <select id="theme-priority" required>
+                            <option value="high">High Priority</option>
+                            <option value="medium">Medium Priority</option>
+                            <option value="low">Low Priority</option>
+                        </select>
+                        <button type="submit">Add Theme</button>
+                    </form>
+
+                    <div id="theme-list" class="item-list">
+                        <!-- Themes will be populated here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 4: Settings -->
+            <div id="settings-tab" class="tab-content">
+                <div class="card">
+                    <h2>Briefing Settings</h2>
+
+                    <form id="settings-form">
+                        <h3>Email Delivery</h3>
+                        <input type="email" id="email-recipient" placeholder="Your email address" required />
+                        <input type="email" id="email-cc" placeholder="CC (optional)" />
+
+                        <h3>Schedule</h3>
+                        <label>Daily briefing time:</label>
+                        <input type="time" id="briefing-time" value="07:00" required />
+
+                        <label>Timezone:</label>
+                        <select id="timezone">
+                            <option value="America/New_York">Eastern Time (ET)</option>
+                            <option value="America/Chicago">Central Time (CT)</option>
+                            <option value="America/Los_Angeles">Pacific Time (PT)</option>
+                            <option value="Asia/Shanghai">China Standard Time (CST)</option>
+                            <option value="Asia/Hong_Kong">Hong Kong Time (HKT)</option>
+                        </select>
+
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="skip-weekends" checked />
+                            Skip weekends
+                        </label>
+
+                        <h3>API Configuration</h3>
+                        <input type="password" id="openai-key" placeholder="OpenAI API Key" />
+                        <p class="help-text">Leave blank to use existing key from .env file</p>
+
+                        <button type="submit" class="btn-primary">Save Settings</button>
+                    </form>
+                </div>
+
+                <div class="card">
+                    <h2>Manual Actions</h2>
+                    <button id="test-briefing-btn" class="btn-secondary">Generate Test Briefing Now</button>
+                    <button id="test-email-btn" class="btn-secondary">Send Test Email</button>
+                    <p id="action-status"></p>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>

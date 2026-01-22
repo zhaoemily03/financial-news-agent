@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(brew:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(pkill:*)"
     ]
   }
 }
