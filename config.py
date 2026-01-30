@@ -4,33 +4,54 @@ Edit this file to customize tickers, themes, and other preferences
 """
 
 # Analyst Coverage Configuration
-TICKERS = [
-    'NVDA',
-    'AVGO',
-    'TSM',
-    'AMD',
-    'INTC',
-    # Add more tickers here
-]
+TICKERS = {
+    'primary_internet': ['META', 'GOOGL', 'AMZN', 'AAPL', 'BABA', '700.HK'],
+    'watchlist_internet': ['NFLX', 'SPOT', 'U', 'APP', 'RBLX'],
+    'primary_software': ['MSFT', 'CRWD', 'ZS', 'PANW', 'NET', 'DDOG', 'SNOW', 'MDB'],
+    'watchlist_software': ['NET', 'ORCL', 'PLTR', 'SHOP'],
+}
+
+# Flat list for easy filtering
+ALL_TICKERS = (
+    TICKERS['primary_internet'] +
+    TICKERS['watchlist_internet'] +
+    TICKERS['primary_software'] +
+    TICKERS['watchlist_software']
+)
+
+# Remove duplicates
+ALL_TICKERS = list(set(ALL_TICKERS))
+
+# Trusted Analysts by Firm
+TRUSTED_ANALYSTS = {
+    'jefferies': [
+        'Brent Thill',
+        'Joseph Gallo'
+    ],
+    # Add more firms and their analysts here
+}
 
 # Investment Themes/Theses Being Tracked
 INVESTMENT_THEMES = [
     {
-        'name': 'AI Infrastructure Buildout',
-        'keywords': ['data center', 'GPU', 'inference', 'training', 'compute capacity', 'AI accelerator'],
+        'name': 'Digital Transformation',
+        'keywords': ['digital transformation', 'cloud migration', 'SaaS adoption', 'enterprise software',
+                     'digital infrastructure', 'platform shift', 'API economy', 'developer tools',
+                     'cloud native', 'modernization'],
         'priority': 'high'
     },
     {
-        'name': 'Memory Chip Market Dynamics',
-        'keywords': ['DRAM', 'NAND', 'HBM', 'memory shortage', 'memory pricing'],
+        'name': 'AI & Machine Learning',
+        'keywords': ['artificial intelligence', 'machine learning', 'generative AI', 'LLM',
+                     'AI infrastructure', 'ML ops', 'AI applications', 'copilot', 'AI assistant'],
         'priority': 'high'
     },
     {
-        'name': 'China Semiconductor Policy',
-        'keywords': ['export controls', 'SMIC', 'China fab', 'sanctions', 'domestic production'],
-        'priority': 'medium'
+        'name': 'Cybersecurity',
+        'keywords': ['cybersecurity', 'zero trust', 'cloud security', 'endpoint protection',
+                     'threat detection', 'data protection', 'identity management', 'SIEM', 'XDR'],
+        'priority': 'high'
     },
-    # Add more themes here
 ]
 
 # Substack Authors to Monitor
@@ -56,9 +77,15 @@ EMAIL_CONFIG = {
 
 # Content Source Configuration
 SOURCES = {
-    'jp_morgan': {
+    'jefferies': {
         'enabled': True,
-        'portal_url': 'https://example.com',  # Update with actual URL
+        'portal_url': 'https://globalmarkets.jefferies.com',
+        'login_required': True,
+        'filter_by_analyst': True,  # Only include reports from TRUSTED_ANALYSTS
+    },
+    'jp_morgan': {
+        'enabled': False,  # Not configured yet
+        'portal_url': 'https://example.com',
         'login_required': True
     },
     'substack': {
@@ -80,6 +107,12 @@ SOURCES = {
 RELEVANCE_THRESHOLD = 0.7  # 0-1 score for content relevance
 MIN_CONTENT_LENGTH = 100  # Minimum words to process
 MAX_BRIEFING_ITEMS_PER_TIER = 10  # Max items per tier to keep briefing concise
+
+# Priority tiers for tickers (affects Tier 1 filtering)
+TICKER_PRIORITY = {
+    'high': TICKERS['primary_internet'] + TICKERS['primary_software'],
+    'medium': TICKERS['watchlist_internet'] + TICKERS['watchlist_software'],
+}
 
 # Storage Configuration
 STORAGE = {

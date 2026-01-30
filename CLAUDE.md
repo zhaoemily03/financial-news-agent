@@ -1,78 +1,145 @@
 # CLAUDE.md
 
-# through consulting Chat-GPT for best design
-Primary Product Constraint
+Instructions for Claude when working on this codebase.
+
+---
+
+## Target User
+
+**Professional TMT analyst** (internet + software focus)
+- Time-constrained: <15 minutes to consume daily briefing
+- Wants to **challenge ideas**, not read summaries
+- Forms their own conviction; does not want AI opinions
+- Covers: META, GOOGL, AMZN, AAPL, MSFT, CRWD, ZS, PANW, NET, DDOG, SNOW, MDB
+
+---
+
+## Primary Product Constraint
 
 The default daily analyst output must be:
 
-Consumable in under 15 minutes
-
-Under 5 pages of content
-
-Without loss of material insight
+- **Consumable in under 15 minutes**
+- **Under 5 pages of content**
+- **Without loss of material insight**
 
 Depth must be accessed via drill-down, never by default.
+
 Any design choice that increases verbosity or hides uncertainty should be avoided.
 
-## Project Overview
+---
 
-Financial news agent that ingests sell-side research from Jefferies (and eventually other sources), extracts PDF content, and generates structured 3-tier daily briefings for a portfolio analyst via GPT-4.
+## Development Rules
 
-## Architecture
+### Before Making Changes
 
-**Pipeline:** Scrape → Summarize → Synthesize → Output
+1. **Always read README.md first** — it documents the full pipeline and where AI is/isn't used
+2. **Do not refactor existing architecture** unless explicitly instructed
+3. **Respect the <15 minute / <5 page constraint** at all times
 
-1. **Scrape** (`jefferies_scraper.py`): Selenium-based scraper authenticates to Jefferies research portal using Shibboleth SSO cookies, searches by trusted analyst via Advanced Search, extracts PDF URLs from report page iframes, downloads PDFs, and extracts text with pdfplumber/PyPDF2.
-2. **Summarize** (`briefing_generator.py`): GPT-4o extracts key data from each report individually (tickers, ratings, price targets, thesis, catalysts, risks).
-3. **Synthesize** (`briefing_generator.py`): GPT-4o combines all summaries into a 3-tier briefing (Urgent / Signal / Reference).
-4. **Orchestrate** (`daily_briefing.py`): Runs the full pipeline end-to-end, saves markdown + HTML output.
+### Code Style
 
-## Key Technical Decisions
+- Keep code clean and concise
+- Use pseudocode-style comments, not verbose documentation
+- Clean up dead code and failed approaches — no long trails of unused code
+- Avoid over-engineering; only build what's needed now
+- OpenAI SDK v1.x: Use `OpenAI()` client, not the old `openai.ChatCompletion.create()` API
+- Print progress with checkmarks (`✓`) and step indicators (`[1/5]`) for pipeline visibility
 
-- **Selenium over requests**: Jefferies portal is a Vue.js/Vuetify SPA that requires JavaScript rendering. Simple HTTP requests return empty HTML.
-- **Two-pass GPT approach**: Individual report summarization first (handles large PDFs within context window), then synthesis across all summaries.
-- **iframe PDF extraction**: PDF URLs require authentication query parameters (`firmId`, `id`). The scraper navigates to each report page and extracts the iframe `src` which contains the full authenticated URL.
-- **Cookie-based auth**: Cookies are manually exported from a browser session to `data/cookies.json`. The scraper loads these into Selenium, then syncs them to a requests session for PDF downloads.
-- **SQLite deduplication**: `report_tracker.py` tracks processed report URLs to avoid re-processing in subsequent runs.
+### Testing
 
-## File Structure
+- Each module should have a `if __name__ == "__main__":` test block
+- Tests should include verification assertions with `✓` output
+- No external test framework required; inline tests are preferred
 
-```
-financial-news-agent/
-├── app.py                  # Flask web dashboard
-├── briefing_generator.py   # GPT-4o two-pass summarize + synthesize
-├── config.py               # Tickers, analysts, themes, source config
-├── cookie_manager.py       # Cookie persistence and refresh
-├── daily_briefing.py       # Pipeline orchestrator
-├── jefferies_scraper.py    # Selenium-based Jefferies portal scraper
-├── report_tracker.py       # SQLite deduplication tracker
-├── requirements.txt        # Python dependencies
-├── .env                    # API keys and credentials (gitignored)
-├── data/                   # Runtime data (gitignored)
-│   ├── cookies.json        # Jefferies session cookies
-│   ├── processed_content.db # SQLite dedup database
-│   └── briefings/          # Generated briefing output (md + html)
-├── templates/              # Flask HTML templates
-├── static/                 # CSS/JS for dashboard
-└── venv/                   # Python virtual environment
-```
+---
 
-## Coding Conventions
+## AI Usage Boundaries
 
-- Keep code clean and concise. Use pseudocode-style comments, not verbose documentation.
-- When debugging, clean up dead code and failed approaches — no long trails of unused code.
-- Avoid over-engineering. Only build what's needed now.
-- OpenAI SDK v1.x: Use `OpenAI()` client, not the old `openai.ChatCompletion.create()` API.
-- Print progress with checkmarks (`✓`) and step indicators (`[1/5]`) for pipeline visibility.
+### Claude Must NOT Introduce:
 
-## Configuration (`config.py`)
+| Anti-Pattern | Why It's Wrong |
+|--------------|----------------|
+| Implicit relevance judgments | Relevance is analyst-configurable, not AI-decided |
+| Narrative summaries that increase verbosity | Violates <5 page constraint |
+| Conclusions or recommendations | System describes; humans decide |
+| Words like "bullish", "bearish", "should", "recommend" | Thesis language is banned |
+| Global importance rankings | Only local prioritization within tiers |
+| Hidden disagreement | Contradictions are first-class outputs |
 
-- **Tickers**: Primary coverage (META, GOOGL, AMZN, AAPL, BABA, 700.HK, MSFT, CRWD, ZS, PANW, NET, DDOG, SNOW, MDB) plus watchlists.
-- **Trusted Analysts**: Brent Thill, Joseph Gallo (Jefferies). Reports by these analysts may list co-authors.
-- **Themes**: Digital Transformation, AI & Machine Learning, Cybersecurity.
-- **BRIEFING_DAYS**: Only include reports from last 5 days.
+### Claude Should Favor:
 
-## Jefferies Scraper Workflow (8 steps)
+| Pattern | Why It's Right |
+|---------|----------------|
+| Structured outputs (dataclasses, typed dicts) | Auditable, testable |
+| Explicit uncertainty ("may", "could", "estimates") | Preserved from source |
+| Deterministic logic where possible | Reproducible, explainable |
+| Rule-based routing over LLM judgment | "Why is this here?" must have a clear answer |
+| Atomic, challengeable claims | Easy to agree, disagree, or ignore |
+| Source citations on every claim | Traceability to PDF page |
+
+### Where AI Is Allowed
+
+Only these modules should use LLM calls:
+
+1. `classifier.py` — Descriptive tagging (topic, ticker, content type)
+2. `claim_extractor.py` — Compress prose to 1-2 atomic bullets
+3. `tier2_synthesizer.py` — Detect agreement/disagreement patterns
+
+All other modules must be deterministic.
+
+---
+
+## Architecture Overview
+
+**Pipeline:** Collect → Normalize → Chunk → Classify → Triage → Claims → Route → Synthesize → Render → Drill-down
+
+See README.md for the full 11-step pipeline with AI/non-AI markers.
+
+### Key Modules
+
+| Module | Purpose | Uses AI? |
+|--------|---------|----------|
+| `schemas.py` | Document, Chunk, Claim dataclasses | No |
+| `normalizer.py` | Raw content → Document | No |
+| `chunker.py` | Document → Chunks (~500 tokens) | No |
+| `classifier.py` | Chunk classification | **Yes** |
+| `triage.py` | Analyst-configurable filtering | No |
+| `claim_extractor.py` | Chunk → atomic claims | **Yes** |
+| `tier_router.py` | Rule-based Tier 1/2/3 | No |
+| `tier2_synthesizer.py` | Cross-claim synthesis | **Yes** |
+| `implication_router.py` | Tier 3 indexing | No |
+| `briefing_renderer.py` | <5 page output | No |
+| `drilldown.py` | Claim provenance | No |
+
+### Data Ingestion
+
+| Module | Purpose |
+|--------|---------|
+| `jefferies_scraper.py` | Selenium-based PDF scraper |
+| `cookie_manager.py` | Cookie persistence |
+| `report_tracker.py` | SQLite deduplication |
+
+---
+
+## Configuration
+
+| File | Purpose |
+|------|---------|
+| `config.py` | Tickers, analysts, themes, relevance threshold |
+| `analyst_config_tmt.py` | TMT-specific topic weights and source credibility |
+| `.env` | API keys (OPENAI_API_KEY) — gitignored |
+| `data/cookies.json` | Jefferies session cookies — gitignored |
+
+### Key Config Values
+
+- **RELEVANCE_THRESHOLD**: 0.7 (chunks below this are triaged out)
+- **BRIEFING_DAYS**: 5 (only process reports from last 5 days)
+- **Primary tickers**: META, GOOGL, AMZN, AAPL, BABA, 700.HK, MSFT, CRWD, ZS, PANW, NET, DDOG, SNOW, MDB
+- **Trusted analysts**: Brent Thill, Joseph Gallo (Jefferies)
+
+---
+
+## Jefferies Scraper Workflow
 
 1. Login (cookies loaded from `data/cookies.json`)
 2. Click ADV SEARCH
@@ -83,14 +150,24 @@ financial-news-agent/
 7. Navigate to report page, extract PDF URL from iframe `src`
 8. Download PDF via requests session with synced Selenium cookies
 
+**Technical note:** Jefferies portal is a Vue.js/Vuetify SPA requiring JavaScript rendering. Simple HTTP requests return empty HTML.
+
+---
+
 ## Current Status
 
-- [x] Jefferies scraping (Selenium + Advanced Search)
-- [x] PDF extraction (pdfplumber + PyPDF2 fallback)
-- [x] Deduplication (SQLite)
-- [x] GPT-4o briefing generator (two-pass)
-- [x] Flask dashboard
-- [ ] End-to-end pipeline test (PDF download in headless mode)
+- [x] Jefferies portal scraping (Selenium + SSO cookies)
+- [x] PDF text extraction (pdfplumber + PyPDF2 fallback)
+- [x] Document normalization and chunking
+- [x] LLM classification (topic, ticker, content type)
+- [x] Analyst-configurable triage with deduplication
+- [x] Claim extraction with judgment hooks
+- [x] Rule-based tier routing (Tier 1/2/3)
+- [x] Tier 2 synthesis (agreement/disagreement/deltas)
+- [x] Tier 3 implication indexing
+- [x] <5 page briefing renderer
+- [x] Drill-down integrity (full claim provenance)
+- [ ] End-to-end pipeline integration test
 - [ ] Substack ingestion
 - [ ] Email delivery
 - [ ] Cron job scheduling (7 AM daily)
