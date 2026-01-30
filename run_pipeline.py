@@ -238,13 +238,14 @@ Jefferies LLC is a registered broker-dealer.
 # Pipeline Stages
 # ------------------------------------------------------------------
 
-def stage_1_collect(stats: PipelineStats) -> List[Dict]:
+def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
     """Stage 1: Collect reports (try scraping, fallback to sample)."""
     print("\n" + "=" * 60)
     print("[1/8] COLLECT — Fetching Jefferies Reports")
     print("=" * 60)
 
     reports = []
+    source_failures = []
 
     # Try live scraping first
     try:
@@ -253,20 +254,32 @@ def stage_1_collect(stats: PipelineStats) -> List[Dict]:
         analysts = TRUSTED_ANALYSTS.get('jefferies', [])
 
         print(f"  Attempting to scrape reports from: {', '.join(analysts)}")
-        reports = scraper.get_reports_by_analysts(analysts, max_per_analyst=5, days=5)
+        result = scraper.get_reports_by_analysts(analysts, max_per_analyst=5, days=5)
+
+        # Handle new dict return format
+        if isinstance(result, dict):
+            reports = result.get('reports', [])
+            source_failures = [f"Jefferies/{a}" for a in result.get('failures', [])]
+        else:
+            # Legacy list format
+            reports = result if result else []
 
         if reports:
             print(f"  ✓ Scraped {len(reports)} reports from Jefferies")
+        if source_failures:
+            print(f"  ⚠ Failed sources: {', '.join(source_failures)}")
     except Exception as e:
         print(f"  ⚠ Scraping failed: {e}")
+        source_failures.append(f"Jefferies (error: {str(e)[:50]})")
 
     # Fallback to sample data
     if not reports:
         print("  → Using sample reports for pipeline demonstration")
         reports = SAMPLE_REPORTS
+        source_failures = []  # Clear failures if using sample
 
     stats.log("collect", len(reports), len(reports), f"{len(reports)} reports")
-    return reports
+    return reports, source_failures
 
 
 def stage_2_normalize(reports: List[Dict], stats: PipelineStats) -> List[Tuple[Document, List[Chunk]]]:
@@ -421,7 +434,7 @@ def stage_7_tier_route(claims: List[ClaimOutput], stats: PipelineStats) -> TierA
     return assignment
 
 
-def stage_8_synthesize_and_render(assignment: TierAssignment, stats: PipelineStats) -> str:
+def stage_8_synthesize_and_render(assignment: TierAssignment, stats: PipelineStats, source_failures: List[str] = None) -> str:
     """Stage 8: Synthesis + Briefing Render — final <5 page output."""
     print("\n" + "=" * 60)
     print("[8/8] SYNTHESIS + RENDER — <5 Page Briefing")
@@ -448,6 +461,16 @@ def stage_8_synthesize_and_render(assignment: TierAssignment, stats: PipelineSta
         tier3_index,
         briefing_date=date.today(),
     )
+
+    # Append source failures notice at the bottom
+    if source_failures:
+        failure_notice = "\n---\n\n## ⚠ Data Collection Notices\n\n"
+        failure_notice += "*The following sources could not be retrieved:*\n\n"
+        for failure in source_failures:
+            failure_notice += f"- {failure}\n"
+        failure_notice += "\n*Briefing may be incomplete. Check source availability.*\n"
+        briefing += failure_notice
+        print(f"  ⚠ Added {len(source_failures)} source failure notices")
 
     # Stats
     briefing_stats = get_briefing_stats(briefing, assignment, tier3_index)
@@ -476,7 +499,7 @@ def run_pipeline():
     stats = PipelineStats()
 
     # Stage 1: Collect
-    reports = stage_1_collect(stats)
+    reports, source_failures = stage_1_collect(stats)
     if not reports:
         print("\n✗ No reports to process. Exiting.")
         return None
@@ -504,7 +527,7 @@ def run_pipeline():
     assignment = stage_7_tier_route(claims, stats)
 
     # Stage 8: Synthesis + Render
-    briefing = stage_8_synthesize_and_render(assignment, stats)
+    briefing = stage_8_synthesize_and_render(assignment, stats, source_failures)
 
     # Print summary
     print(stats.summary())

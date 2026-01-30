@@ -110,15 +110,13 @@ class JefferiesScraper:
 
         self._init_driver()
 
-        # Step 2: Navigate to Advanced Search
-        self.driver.get(self.CONTENT_URL)
+        # Step 2: Navigate directly to Advanced Search URL (clean slate)
+        self.driver.get(self.CONTENT_URL + "/advsearch")
         time.sleep(3)
 
-        adv_link = self._find_and_click_adv_search()
-        if not adv_link:
-            print("✗ Could not find Advanced Search link")
-            return []
-        time.sleep(3)
+        # Click CLEAR ALL to reset any previous filters
+        self._click_clear_all()
+        time.sleep(1)
 
         # Step 3: Expand Analysts/Authors panel and type name
         if not self._enter_analyst_name(analyst_name):
@@ -138,8 +136,23 @@ class JefferiesScraper:
 
         return reports
 
+    def _click_clear_all(self) -> bool:
+        """Click CLEAR ALL button to reset filters between searches"""
+        try:
+            all_buttons = self.driver.find_elements(By.CSS_SELECTOR, 'button.v-btn, button')
+            for btn in all_buttons:
+                btn_text = btn.text.strip().upper()
+                if 'CLEAR' in btn_text:
+                    self.driver.execute_script("arguments[0].click();", btn)
+                    print("  ✓ Reset filters (CLEAR ALL)")
+                    time.sleep(1)
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _find_and_click_adv_search(self) -> bool:
-        """Step 2: Find and click ADV SEARCH link"""
+        """Step 2: Find and click ADV SEARCH link (legacy, now navigating directly)"""
         try:
             # Try exact match first
             links = self.driver.find_elements(By.LINK_TEXT, 'ADV SEARCH')
@@ -424,7 +437,7 @@ class JefferiesScraper:
 
     def get_reports_by_analysts(self, analyst_names: List[str],
                                 max_per_analyst: int = 10,
-                                days: int = 5) -> List[Dict]:
+                                days: int = 5) -> Dict:
         """
         Full pipeline: search analysts → filter by date → skip processed → extract PDFs.
 
@@ -434,15 +447,20 @@ class JefferiesScraper:
             days: Only include reports from last N days
 
         Returns:
-            List of reports with extracted content
+            Dict with 'reports' (list) and 'failures' (list of failed analyst names)
         """
         all_reports = []
+        failed_analysts = []
 
         try:
             # Steps 2-6: Search for each analyst
             for analyst in analyst_names:
                 reports = self.search_by_analyst(analyst, max_per_analyst)
-                all_reports.extend(reports)
+                if reports:
+                    all_reports.extend(reports)
+                else:
+                    failed_analysts.append(analyst)
+                    print(f"  ⚠ No reports retrieved for {analyst}")
 
             print(f"\n{'='*50}")
             print(f"Total reports found: {len(all_reports)}")
@@ -459,7 +477,7 @@ class JefferiesScraper:
 
             if not new_reports:
                 print("\n✓ No new reports to process")
-                return []
+                return {'reports': [], 'failures': failed_analysts}
 
             # Sync browser cookies to requests session for PDF downloads
             self._sync_cookies_from_driver()
@@ -488,7 +506,9 @@ class JefferiesScraper:
 
             print(f"\n{'='*50}")
             print(f"✓ Successfully extracted {len(processed)} reports")
-            return processed
+            if failed_analysts:
+                print(f"⚠ Failed to retrieve reports from: {', '.join(failed_analysts)}")
+            return {'reports': processed, 'failures': failed_analysts}
 
         finally:
             self.close_driver()
