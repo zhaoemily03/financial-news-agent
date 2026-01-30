@@ -1,0 +1,136 @@
+{
+  "_doc": "Frozen AnalystConfig for TMT analyst (internet + software focus). Aggressive filtering for <5 page briefing.",
+  "_schema_version": "1.0",
+
+  "tickers": {
+    "_doc": "Coverage universe. Primary = daily attention, Watchlist = opportunistic.",
+    "primary_internet": ["META", "GOOGL", "AMZN", "AAPL", "BABA", "700.HK"],
+    "primary_software": ["MSFT", "CRWD", "ZS", "PANW", "NET", "DDOG", "SNOW", "MDB"],
+    "watchlist_internet": ["NFLX", "SPOT", "U", "APP", "RBLX"],
+    "watchlist_software": ["ORCL", "PLTR", "SHOP"]
+  },
+
+  "ticker_priority": {
+    "_doc": "Tier routing: high = Tier 1 eligible, medium = Tier 2/3 only.",
+    "high": ["META", "GOOGL", "AMZN", "AAPL", "BABA", "700.HK", "MSFT", "CRWD", "ZS", "PANW", "NET", "DDOG", "SNOW", "MDB"],
+    "medium": ["NFLX", "SPOT", "U", "APP", "RBLX", "ORCL", "PLTR", "SHOP"]
+  },
+
+  "trusted_analysts": {
+    "_doc": "Claims from trusted analysts bypass novelty filters. Map: source -> analyst names.",
+    "jefferies": ["Brent Thill", "Joseph Gallo"]
+  },
+
+  "themes": {
+    "_doc": "Investment themes. Priority: critical > high > medium. Keywords drive classifier boost.",
+    "items": [
+      {
+        "name": "AI Infrastructure",
+        "keywords": ["AI", "LLM", "GPU", "inference", "training", "model", "generative"],
+        "priority": "critical"
+      },
+      {
+        "name": "Cloud & SaaS",
+        "keywords": ["cloud", "SaaS", "ARR", "NRR", "consumption", "IaaS", "PaaS"],
+        "priority": "high"
+      },
+      {
+        "name": "Cybersecurity",
+        "keywords": ["zero trust", "XDR", "SIEM", "endpoint", "threat", "breach"],
+        "priority": "high"
+      },
+      {
+        "name": "Digital Advertising",
+        "keywords": ["ad revenue", "ROAS", "programmatic", "CPM", "impressions"],
+        "priority": "medium"
+      }
+    ]
+  },
+
+  "sources": {
+    "_doc": "Source credibility: 0.0-1.0. Higher = more trusted. Used in relevance scoring.",
+    "jefferies": { "enabled": true, "credibility": 1.0 },
+    "jpmorgan": { "enabled": false, "credibility": 0.9 },
+    "morgan_stanley": { "enabled": false, "credibility": 0.9 },
+    "substack": { "enabled": true, "credibility": 0.6 }
+  },
+
+  "topic_weights": {
+    "_doc": "Topic relevance: 0.0-1.0. AI/infra > consumer internet per spec.",
+    "ai_ml": 1.0,
+    "cloud": 0.9,
+    "infrastructure": 0.85,
+    "semiconductors": 0.8,
+    "software": 0.75,
+    "cybersecurity": 0.7,
+    "advertising": 0.6,
+    "social": 0.55,
+    "content": 0.5,
+    "ecommerce": 0.5,
+    "gaming": 0.45,
+    "hardware": 0.45,
+    "fintech": 0.4,
+    "networks": 0.4,
+    "telecom_infra": 0.35,
+    "general": 0.3
+  },
+
+  "content_type_weights": {
+    "_doc": "Weight by content type. Facts and forecasts > interpretation.",
+    "fact": 1.0,
+    "forecast": 0.9,
+    "risk": 0.85,
+    "interpretation": 0.7
+  },
+
+  "novelty_weights": {
+    "_doc": "Novelty filter. Rehash = 0.2 (below threshold, filtered out).",
+    "new": 1.0,
+    "incremental": 0.6,
+    "rehash": 0.2
+  },
+
+  "polarity_weights": {
+    "_doc": "Polarity: positive/negative equally important, neutral less actionable.",
+    "positive": 1.0,
+    "negative": 1.0,
+    "mixed": 0.8,
+    "neutral": 0.6
+  },
+
+  "filtering": {
+    "_doc": "Aggressive filtering to enforce <5 page / <15 min constraint.",
+    "relevance_threshold": 0.7,
+    "_doc_relevance_threshold": "Chunks below this score are dropped. 0.7 = fairly aggressive.",
+    "minimum_novelty_threshold": 0.3,
+    "_doc_minimum_novelty_threshold": "Hard filter: anything below (e.g., rehash=0.2) is dropped.",
+    "briefing_days": 5,
+    "_doc_briefing_days": "Only process reports from last N days."
+  },
+
+  "tier_caps": {
+    "_doc": "Explicit output caps per tier. Total ~20-25 items for <5 pages.",
+
+    "tier1_max_items": 5,
+    "_doc_tier1": "Tier 1 = Direct impacts (rating changes, price targets, key catalysts). Keep tight.",
+
+    "tier2_max_bullets": 7,
+    "_doc_tier2": "Tier 2 = Synthesized cross-source bullets (agreement/disagreement/deltas). Medium.",
+
+    "tier3_max_items": 12,
+    "_doc_tier3": "Tier 3 = Reference index (drill-down only, not in main briefing). Can be larger.",
+
+    "total_claim_cap": 25,
+    "_doc_total_claim_cap": "Hard cap on total claims before tier routing. Target 20-30 range."
+  },
+
+  "scoring_weights": {
+    "_doc": "Relevance score = weighted sum of factors. Must sum to 1.0.",
+    "topic": 0.30,
+    "content_type": 0.15,
+    "novelty": 0.20,
+    "polarity": 0.10,
+    "ticker": 0.15,
+    "source": 0.10
+  }
+}
