@@ -2,7 +2,7 @@
 """
 Cookie Refresh Script
 Runs scrapers in "refresh only" mode to keep session cookies valid.
-Designed to run via cron job before the main pipeline.
+Designed to run via launchd (at login and every 6 hours).
 
 Usage:
     python refresh_cookies.py          # Refresh all enabled portals
