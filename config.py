@@ -23,12 +23,12 @@ ALL_TICKERS = (
 ALL_TICKERS = list(set(ALL_TICKERS))
 
 # Trusted Analysts by Firm
+# DEPRECATED: Now uses portal's "Followed Notifications" feature.
+# Analysts you follow in the portal ARE your trusted analysts.
+# This dict is kept for backward compatibility but is ignored by the scraper.
 TRUSTED_ANALYSTS = {
-    'jefferies': [
-        'Brent Thill',
-        'Joseph Gallo'
-    ],
-    # Add more firms and their analysts here
+    'jefferies': ['(dynamic - uses portal follows)'],
+    # Follow analysts directly in each portal - scraper pulls from your followed list
 }
 
 # Investment Themes/Theses Being Tracked
@@ -76,20 +76,44 @@ EMAIL_CONFIG = {
 }
 
 # Content Source Configuration
+# Sell-side portals use the PortalRegistry for unified scraping
 SOURCES = {
+    # Sell-side research portals (use PortalRegistry)
     'jefferies': {
         'enabled': True,
-        'portal_url': 'https://globalmarkets.jefferies.com',
+        'portal_url': 'https://content.jefferies.com',
         'login_required': True,
-        'filter_by_analyst': True,  # Only include reports from TRUSTED_ANALYSTS
+        'uses_followed_notifications': True,
+        'max_reports': 20,  # Max reports to fetch per run
+        'scraper_class': 'JefferiesScraper',  # From jefferies_scraper.py
     },
-    'jp_morgan': {
-        'enabled': False,  # Not configured yet
-        'portal_url': 'https://example.com',
-        'login_required': True
-    },
-    'substack': {
+    'morgan_stanley': {
         'enabled': True,
+        'portal_url': 'https://ny.matrix.ms.com/eqr/research/ui/#/home',
+        'login_required': True,
+        'uses_followed_notifications': True,
+        'max_reports': 25,  # Collect more to capture thematic content
+        'scraper_class': 'MorganStanleyScraper',
+    },
+    'goldman': {
+        'enabled': False,  # Not implemented yet
+        'portal_url': 'https://marquee.gs.com',
+        'login_required': True,
+        'uses_followed_notifications': True,
+        'max_reports': 20,
+        'scraper_class': 'GoldmanScraper',  # Future: goldman_scraper.py
+    },
+    'jpmorgan': {
+        'enabled': False,  # Not implemented yet
+        'portal_url': 'https://ny.matrix.ms.com',
+        'login_required': True,
+        'uses_followed_notifications': True,
+        'max_reports': 20,
+        'scraper_class': 'jpmorganscraper',  # Future: morgan_stanley_scraper.py
+    },
+    # Non-portal sources (separate ingestion pipeline)
+    'substack': {
+        'enabled': False,  # Not implemented yet
         'check_frequency_hours': 24
     },
     'youtube': {
@@ -99,7 +123,33 @@ SOURCES = {
         'enabled': False,  # Phase 2
     },
     'podcasts': {
-        'enabled': False,  # Phase 2
+        'enabled': True,
+        'check_frequency_hours': 24,
+        'max_episodes_per_podcast': 3,
+        'days_lookback': 7,
+        'sources': {
+            'all-in': {
+                'enabled': True,
+                'name': 'All-In Podcast',
+                'type': 'youtube',
+                'channel_id': 'UCESLZhusAkFfsNsApnjF_Cg',
+                'max_episodes': 2,
+            },
+            'bg2': {
+                'enabled': False,  # Uploads infrequently
+                'name': 'BG2 Pod',
+                'type': 'rss',
+                'rss_url': 'https://anchor.fm/s/f06c2370/podcast/rss',
+                'max_episodes': 2,
+            },
+            'acquired': {
+                'enabled': True,
+                'name': 'Acquired',
+                'type': 'rss',
+                'rss_url': 'https://feeds.transistor.fm/acquired',
+                'max_episodes': 1,  # Long episodes, limit to 1
+            },
+        },
     }
 }
 

@@ -37,6 +37,7 @@ class AgreementCluster:
     topic: str                    # What they agree on (ticker or theme)
     claim_ids: List[str]          # Participating claim IDs
     summary: str                  # One-line description (no judgment)
+    specifics: List[str] = field(default_factory=list)  # Actual claim content for detail
 
 
 @dataclass
@@ -45,8 +46,10 @@ class DisagreementCluster:
     topic: str                    # What they disagree about
     side_a_ids: List[str]         # Claim IDs on one side
     side_b_ids: List[str]         # Claim IDs on other side
-    side_a_position: str          # Brief position A
-    side_b_position: str          # Brief position B
+    side_a_position: str          # Brief position A (with specifics)
+    side_b_position: str          # Brief position B (with specifics)
+    side_a_specifics: List[str] = field(default_factory=list)  # Actual claim content
+    side_b_specifics: List[str] = field(default_factory=list)  # Actual claim content
 
 
 @dataclass
@@ -66,32 +69,32 @@ class Tier2Synthesis:
     no_disagreement: bool = False  # True if explicitly no disagreement found
 
     def format_markdown(self) -> str:
-        """Format synthesis as markdown bullets with claim citations."""
+        """Format synthesis as markdown bullets with specific claim content."""
         lines = []
 
-        # Agreements
+        # Agreements - show WHAT they agree on
         lines.append("### Where Analysts Agree")
         if self.agreements:
             for ag in self.agreements:
-                ids = ', '.join(ag.claim_ids)
-                lines.append(f"- **{ag.topic}**: {ag.summary} [claims: {ids}]")
+                lines.append(f"- **{ag.topic}**: {ag.summary}")
+                # Show specifics so analyst knows exactly what's agreed
+                for specific in ag.specifics[:2]:
+                    lines.append(f"  - {specific}")
         else:
             lines.append("- *No clear agreement clusters detected.*")
         lines.append("")
 
-        # Disagreements
+        # Disagreements - show WHAT they disagree on
         lines.append("### Where Analysts Disagree")
         if self.disagreements:
             for dg in self.disagreements:
-                a_ids = ', '.join(dg.side_a_ids)
-                b_ids = ', '.join(dg.side_b_ids)
                 lines.append(f"- **{dg.topic}**:")
-                lines.append(f"  - {dg.side_a_position} [claims: {a_ids}]")
-                lines.append(f"  - {dg.side_b_position} [claims: {b_ids}]")
+                lines.append(f"  - {dg.side_a_position}")
+                lines.append(f"  - {dg.side_b_position}")
         elif self.no_disagreement:
-            lines.append("- *No disagreement detected. All claims align.*")
+            lines.append("- *No disagreement detected across sources.*")
         else:
-            lines.append("- *Insufficient data to detect disagreement.*")
+            lines.append("- *Insufficient overlap to detect disagreement.*")
         lines.append("")
 
         # Deltas
@@ -99,9 +102,9 @@ class Tier2Synthesis:
         if self.deltas:
             for delta in self.deltas:
                 if delta.prior_state:
-                    lines.append(f"- {delta.description} (was: {delta.prior_state}) [claim: {delta.claim_id}]")
+                    lines.append(f"- {delta.description} (was: {delta.prior_state})")
                 else:
-                    lines.append(f"- {delta.description} [claim: {delta.claim_id}]")
+                    lines.append(f"- {delta.description}")
         else:
             lines.append("- *No prior day data available for comparison.*")
 
@@ -118,8 +121,9 @@ class Tier2Synthesis:
 
 def _detect_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster]:
     """
-    Find claims that agree (same ticker + same polarity direction).
-    Agreement = multiple claims pointing same direction on same asset.
+    Find claims that agree (same ticker/theme + same polarity direction).
+    Agreement = multiple claims pointing same direction on same topic.
+    Now includes theme-based and macro topics, not just tickers.
     """
     agreements = []
 
@@ -133,30 +137,120 @@ def _detect_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster]:
         if len(ticker_claims) < 2:
             continue
 
-        # Check for polarity alignment
-        # confirms_consensus = bullish alignment
-        # contradicts_* = bearish/contrarian alignment
         confirms = [c for c in ticker_claims if c.belief_pressure == 'confirms_consensus']
         contradicts = [c for c in ticker_claims
                        if c.belief_pressure in ('contradicts_consensus', 'contradicts_prior_assumptions')]
 
-        # If 2+ claims confirm consensus on same ticker = agreement
         if len(confirms) >= 2:
+            # Extract specifics from actual claim content
+            specifics = [c.bullets[0][:100] for c in confirms[:3]]
             agreements.append(AgreementCluster(
                 topic=ticker,
                 claim_ids=[c.chunk_id for c in confirms],
-                summary=f"Multiple sources confirm consensus view on {ticker}",
+                summary=_extract_agreement_summary(confirms, ticker),
+                specifics=specifics,
             ))
 
-        # If 2+ claims are contrarian on same ticker = agreement (on contrarian view)
         if len(contradicts) >= 2:
+            specifics = [c.bullets[0][:100] for c in contradicts[:3]]
             agreements.append(AgreementCluster(
                 topic=f"{ticker} (contrarian)",
                 claim_ids=[c.chunk_id for c in contradicts],
-                summary=f"Multiple sources challenge consensus on {ticker}",
+                summary=_extract_agreement_summary(contradicts, ticker, contrarian=True),
+                specifics=specifics,
             ))
 
+    # Group by theme/topic keywords (macro, sector, etc.)
+    theme_agreements = _detect_theme_agreements(claims)
+    agreements.extend(theme_agreements)
+
     return agreements
+
+
+def _extract_agreement_summary(claims: List[ClaimOutput], topic: str, contrarian: bool = False) -> str:
+    """Extract a specific summary of what claims agree on, using actual content."""
+    if not claims:
+        return f"Multiple sources {'challenge' if contrarian else 'confirm'} view on {topic}"
+
+    # Find common keywords/phrases in the claims
+    all_text = ' '.join(c.bullets[0].lower() for c in claims)
+
+    # Look for specific metrics or concepts
+    keywords = []
+    if 'revenue' in all_text or 'growth' in all_text:
+        keywords.append('revenue trajectory')
+    if 'margin' in all_text:
+        keywords.append('margin trends')
+    if 'ai' in all_text or 'artificial intelligence' in all_text:
+        keywords.append('AI impact')
+    if 'cloud' in all_text:
+        keywords.append('cloud performance')
+    if 'competition' in all_text or 'competitive' in all_text:
+        keywords.append('competitive position')
+
+    if keywords:
+        focus = ', '.join(keywords[:2])
+        if contrarian:
+            return f"Multiple sources raise concerns about {topic} {focus}"
+        return f"Multiple sources aligned on {topic} {focus}"
+
+    # Default to first claim's content as summary
+    first_bullet = claims[0].bullets[0][:80]
+    if contrarian:
+        return f"Sources challenge consensus: {first_bullet}"
+    return f"Sources agree: {first_bullet}"
+
+
+def _detect_theme_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster]:
+    """Detect agreement on themes/macro topics (not tied to specific tickers)."""
+    theme_agreements = []
+
+    # Theme keywords to look for
+    MACRO_THEMES = {
+        'AI/ML': ['ai', 'artificial intelligence', 'machine learning', 'llm', 'gpu', 'inference'],
+        'Cloud': ['cloud', 'aws', 'azure', 'gcp', 'iaas', 'paas', 'saas'],
+        'Macro': ['gdp', 'inflation', 'interest rate', 'fed', 'economy', 'recession'],
+        'Enterprise': ['enterprise', 'b2b', 'corporate', 'digital transformation'],
+        'Cybersecurity': ['security', 'cyber', 'threat', 'breach', 'zero trust'],
+        'Consumer': ['consumer', 'spending', 'retail', 'demand'],
+    }
+
+    # Group claims by detected theme
+    by_theme = defaultdict(list)
+    for claim in claims:
+        text = claim.bullets[0].lower() if claim.bullets else ''
+        for theme, keywords in MACRO_THEMES.items():
+            if any(kw in text for kw in keywords):
+                by_theme[theme].append(claim)
+
+    for theme, theme_claims in by_theme.items():
+        if len(theme_claims) < 2:
+            continue
+
+        # Check for alignment
+        confirms = [c for c in theme_claims if c.belief_pressure == 'confirms_consensus']
+        contradicts = [c for c in theme_claims
+                       if c.belief_pressure in ('contradicts_consensus', 'contradicts_prior_assumptions')]
+
+        if len(confirms) >= 2:
+            specifics = [c.bullets[0][:100] for c in confirms[:3]]
+            theme_agreements.append(AgreementCluster(
+                topic=f"{theme} (theme)",
+                claim_ids=[c.chunk_id for c in confirms],
+                summary=f"Multiple reports aligned on {theme} outlook",
+                specifics=specifics,
+            ))
+
+        if len(contradicts) >= 2:
+            specifics = [c.bullets[0][:100] for c in contradicts[:3]]
+            theme_agreements.append(AgreementCluster(
+                topic=f"{theme} concerns",
+                claim_ids=[c.chunk_id for c in contradicts],
+                summary=f"Multiple reports flag {theme} risks",
+                specifics=specifics,
+            ))
+
+    return theme_agreements
 
 
 # ------------------------------------------------------------------
@@ -165,8 +259,9 @@ def _detect_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster]:
 
 def _detect_disagreements(claims: List[ClaimOutput]) -> Tuple[List[DisagreementCluster], bool]:
     """
-    Find claims that disagree (same ticker + opposite positions).
+    Find claims that disagree (same ticker/theme + opposite positions).
     Returns (disagreements, no_disagreement_flag).
+    Now includes specific claim content for clarity.
     """
     disagreements = []
     found_any_potential = False
@@ -183,19 +278,24 @@ def _detect_disagreements(claims: List[ClaimOutput]) -> Tuple[List[DisagreementC
 
         found_any_potential = True
 
-        # Check for belief_pressure disagreement
         confirms = [c for c in ticker_claims if c.belief_pressure == 'confirms_consensus']
         contradicts = [c for c in ticker_claims
                        if c.belief_pressure in ('contradicts_consensus', 'contradicts_prior_assumptions')]
 
         # Disagreement = some confirm, some contradict
         if confirms and contradicts:
+            # Extract specific positions from actual claims
+            side_a_specific = confirms[0].bullets[0][:100] if confirms else ""
+            side_b_specific = contradicts[0].bullets[0][:100] if contradicts else ""
+
             disagreements.append(DisagreementCluster(
                 topic=ticker,
                 side_a_ids=[c.chunk_id for c in confirms],
                 side_b_ids=[c.chunk_id for c in contradicts],
-                side_a_position=f"Confirms consensus view on {ticker}",
-                side_b_position=f"Challenges consensus view on {ticker}",
+                side_a_position=f"Bullish: {side_a_specific}",
+                side_b_position=f"Cautious: {side_b_specific}",
+                side_a_specifics=[c.bullets[0][:80] for c in confirms[:2]],
+                side_b_specifics=[c.bullets[0][:80] for c in contradicts[:2]],
             ))
 
         # Also check for content_type disagreement (forecast vs risk)
@@ -203,21 +303,73 @@ def _detect_disagreements(claims: List[ClaimOutput]) -> Tuple[List[DisagreementC
         risks = [c for c in ticker_claims if c.claim_type == 'risk']
 
         if forecasts and risks:
-            # Only add if not already captured by belief_pressure
             existing_topics = {d.topic for d in disagreements}
             if f"{ticker} outlook" not in existing_topics:
+                forecast_text = forecasts[0].bullets[0][:80] if forecasts else ""
+                risk_text = risks[0].bullets[0][:80] if risks else ""
+
                 disagreements.append(DisagreementCluster(
                     topic=f"{ticker} outlook",
                     side_a_ids=[c.chunk_id for c in forecasts],
                     side_b_ids=[c.chunk_id for c in risks],
-                    side_a_position=f"Positive forecasts on {ticker}",
-                    side_b_position=f"Risk factors noted for {ticker}",
+                    side_a_position=f"Positive outlook: {forecast_text}",
+                    side_b_position=f"Risk factors: {risk_text}",
+                    side_a_specifics=[c.bullets[0][:80] for c in forecasts[:2]],
+                    side_b_specifics=[c.bullets[0][:80] for c in risks[:2]],
                 ))
 
-    # If we had potential disagreements but found none
+    # Theme-based disagreements
+    theme_disagreements = _detect_theme_disagreements(claims)
+    disagreements.extend(theme_disagreements)
+    if theme_disagreements:
+        found_any_potential = True
+
     no_disagreement = found_any_potential and len(disagreements) == 0
 
     return disagreements, no_disagreement
+
+
+def _detect_theme_disagreements(claims: List[ClaimOutput]) -> List[DisagreementCluster]:
+    """Detect disagreements on themes/macro topics."""
+    theme_disagreements = []
+
+    MACRO_THEMES = {
+        'AI/ML': ['ai', 'artificial intelligence', 'machine learning', 'llm', 'gpu'],
+        'Cloud': ['cloud', 'aws', 'azure', 'gcp', 'iaas', 'saas'],
+        'Macro': ['gdp', 'inflation', 'interest rate', 'fed', 'economy'],
+        'Enterprise': ['enterprise', 'b2b', 'corporate', 'digital transformation'],
+    }
+
+    by_theme = defaultdict(list)
+    for claim in claims:
+        text = claim.bullets[0].lower() if claim.bullets else ''
+        for theme, keywords in MACRO_THEMES.items():
+            if any(kw in text for kw in keywords):
+                by_theme[theme].append(claim)
+
+    for theme, theme_claims in by_theme.items():
+        if len(theme_claims) < 2:
+            continue
+
+        confirms = [c for c in theme_claims if c.belief_pressure == 'confirms_consensus']
+        contradicts = [c for c in theme_claims
+                       if c.belief_pressure in ('contradicts_consensus', 'contradicts_prior_assumptions')]
+
+        if confirms and contradicts:
+            side_a = confirms[0].bullets[0][:80] if confirms else ""
+            side_b = contradicts[0].bullets[0][:80] if contradicts else ""
+
+            theme_disagreements.append(DisagreementCluster(
+                topic=f"{theme} (theme)",
+                side_a_ids=[c.chunk_id for c in confirms],
+                side_b_ids=[c.chunk_id for c in contradicts],
+                side_a_position=f"Positive: {side_a}",
+                side_b_position=f"Concerns: {side_b}",
+                side_a_specifics=[c.bullets[0][:80] for c in confirms[:2]],
+                side_b_specifics=[c.bullets[0][:80] for c in contradicts[:2]],
+            ))
+
+    return theme_disagreements
 
 
 # ------------------------------------------------------------------

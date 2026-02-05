@@ -128,66 +128,128 @@ def _render_tier1(claims: List[ClaimOutput]) -> str:
 def _render_tier2(synthesis: Tier2Synthesis, claims: List[ClaimOutput]) -> str:
     """
     Render Tier 2: Signal vs Noise
-    3-5 synthesized bullets with agreement/disagreement/what changed.
+    NEVER empty - always shows synthesis sections from template.
+    Includes: Synthesis Across Reports, Consensus vs Divergence, Quant vs Qual.
     """
     lines = []
     lines.append("## Tier 2: What's the Signal from the Noise")
     lines.append("*Important, not urgent*\n")
 
-    if not synthesis.has_content() and not claims:
-        lines.append("*No cross-report patterns detected today.*")
-        return '\n'.join(lines)
-
-    bullet_count = 0
-
-    # Synthesis: Where agreeing
-    lines.append("### Analyst Consensus vs. Divergence")
-
-    if synthesis.agreements:
-        for ag in synthesis.agreements[:2]:  # Max 2 agreement bullets
-            if bullet_count >= TIER_2_MAX_BULLETS:
-                break
-            ids = ', '.join(ag.claim_ids[:3])  # Limit cited IDs
-            lines.append(f"- **Agreement on {ag.topic}**: {ag.summary}")
-            lines.append(f"  *[claims: {ids}]*")
-            bullet_count += 1
-
-    if synthesis.disagreements:
-        for dg in synthesis.disagreements[:2]:  # Max 2 disagreement bullets
-            if bullet_count >= TIER_2_MAX_BULLETS:
-                break
-            lines.append(f"- **Disagreement on {dg.topic}**:")
-            lines.append(f"  - {dg.side_a_position}")
-            lines.append(f"  - {dg.side_b_position}")
-            bullet_count += 1
-
-    if synthesis.no_disagreement:
-        lines.append("- *No disagreement detected across sources.*")
-        bullet_count += 1
-
-    if not synthesis.agreements and not synthesis.disagreements:
-        lines.append("- *Insufficient overlap to detect consensus/divergence.*")
-        bullet_count += 1
-
+    # Section 1: Synthesis Across All Reports (common themes)
+    lines.append("### Synthesis Across All Reports")
+    _render_common_themes(lines, synthesis, claims)
     lines.append("")
 
-    # Synthesis: What changed
-    lines.append("### What Changed vs Prior Day")
+    # Section 2: Analyst Consensus vs. Divergence
+    lines.append("### Analyst Consensus vs. Divergence")
+    _render_consensus_divergence(lines, synthesis)
+    lines.append("")
 
-    if synthesis.deltas and bullet_count < TIER_2_MAX_BULLETS:
-        remaining = TIER_2_MAX_BULLETS - bullet_count
-        for delta in synthesis.deltas[:remaining]:
+    # Section 3: What Changed (deltas/breaking)
+    lines.append("### What Changed vs Prior Day")
+    _render_deltas(lines, synthesis, claims)
+    lines.append("")
+
+    return '\n'.join(lines)
+
+
+def _render_common_themes(lines: List[str], synthesis: Tier2Synthesis, claims: List[ClaimOutput]):
+    """Extract and render common themes across all reports."""
+    theme_bullets = []
+
+    # Look for theme-based agreements (macro topics)
+    theme_agreements = [ag for ag in synthesis.agreements if '(theme)' in ag.topic or 'concerns' in ag.topic]
+
+    if theme_agreements:
+        for ag in theme_agreements[:2]:
+            theme_name = ag.topic.replace(' (theme)', '').replace(' concerns', '')
+            lines.append(f"- **{theme_name}**: {ag.summary}")
+            for specific in ag.specifics[:2]:
+                lines.append(f"  - {specific}")
+            theme_bullets.append(ag)
+
+    # If no theme agreements, synthesize from claims directly
+    if not theme_bullets and claims:
+        # Group claims by common topics
+        topic_counts = _extract_topic_signals(claims)
+        for topic, count in list(topic_counts.items())[:3]:
+            if count >= 2:
+                lines.append(f"- **{topic}**: Multiple reports ({count}) touch on this theme")
+
+    if not theme_bullets and not claims:
+        lines.append("- *Reviewing reports for common threads...*")
+
+
+def _extract_topic_signals(claims: List[ClaimOutput]) -> dict:
+    """Extract topic signals from claims for synthesis."""
+    from collections import Counter
+
+    topic_keywords = {
+        'AI investment': ['ai', 'artificial intelligence', 'ml', 'llm', 'gpu'],
+        'Cloud momentum': ['cloud', 'aws', 'azure', 'gcp'],
+        'Enterprise spending': ['enterprise', 'corporate', 'b2b', 'spending'],
+        'Margin trends': ['margin', 'profitability', 'cost', 'efficiency'],
+        'Competition': ['competition', 'competitive', 'market share'],
+        'Guidance': ['guidance', 'outlook', 'forecast', 'expect'],
+    }
+
+    counts = Counter()
+    for claim in claims:
+        text = ' '.join(claim.bullets).lower() if claim.bullets else ''
+        for topic, keywords in topic_keywords.items():
+            if any(kw in text for kw in keywords):
+                counts[topic] += 1
+
+    return dict(counts.most_common(5))
+
+
+def _render_consensus_divergence(lines: List[str], synthesis: Tier2Synthesis):
+    """Render where analysts agree and disagree with specifics."""
+    bullet_count = 0
+
+    # Ticker-based agreements (not themes)
+    ticker_agreements = [ag for ag in synthesis.agreements if '(theme)' not in ag.topic and 'concerns' not in ag.topic]
+
+    if ticker_agreements:
+        for ag in ticker_agreements[:2]:
+            if bullet_count >= 3:
+                break
+            lines.append(f"- **Agreement on {ag.topic}**: {ag.summary}")
+            for specific in ag.specifics[:2]:
+                lines.append(f"  - {specific}")
+            bullet_count += 1
+
+    # Disagreements with specific positions
+    if synthesis.disagreements:
+        for dg in synthesis.disagreements[:2]:
+            if bullet_count >= 4:
+                break
+            lines.append(f"- **Disagreement on {dg.topic}**:")
+            lines.append(f"  - *View A*: {dg.side_a_position}")
+            lines.append(f"  - *View B*: {dg.side_b_position}")
+            bullet_count += 1
+    elif synthesis.no_disagreement:
+        lines.append("- *No disagreement detected - sources aligned this period*")
+    elif not ticker_agreements:
+        lines.append("- *Insufficient cross-source overlap to detect patterns*")
+
+
+def _render_deltas(lines: List[str], synthesis: Tier2Synthesis, claims: List[ClaimOutput]):
+    """Render what changed vs prior day."""
+    if synthesis.deltas:
+        for delta in synthesis.deltas[:3]:
             if delta.prior_state:
                 lines.append(f"- {delta.description} (was: {delta.prior_state})")
             else:
                 lines.append(f"- {delta.description}")
-            lines.append(f"  *[claim: {delta.claim_id}]*")
     else:
-        lines.append("- *No prior day data for comparison.*")
-
-    lines.append("")
-
-    return '\n'.join(lines)
+        # Look for breaking news in claims as proxy for change
+        breaking = [c for c in claims if c.time_sensitivity == 'breaking']
+        if breaking:
+            for c in breaking[:2]:
+                lines.append(f"- [NEW] {c.bullets[0][:100]}")
+        else:
+            lines.append("- *No significant changes vs prior coverage*")
 
 
 # ------------------------------------------------------------------

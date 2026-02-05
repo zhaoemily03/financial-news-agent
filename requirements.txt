@@ -6,6 +6,10 @@ openai>=2.16.0
 lxml==5.1.0
 PyPDF2==3.0.1
 pdfplumber==0.10.3
-selenium==4.40.0
+selenium==4.27.1
 webdriver-manager==4.0.2
 python-dateutil==2.8.2
+
+# Podcast ingestion
+feedparser>=6.0.10
+youtube-transcript-api>=0.6.1

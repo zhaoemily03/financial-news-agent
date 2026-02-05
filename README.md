@@ -42,7 +42,7 @@ What the system will never do:
 ## High-Level Pipeline (End-to-End)
 
 ```
-Source PDFs → Normalize → Chunk → Classify → Triage → Claims → Route → Synthesize → Render → Drill-down
+Source PDFs → Normalize → Chunk → Classify → Triage → Claims → Scope Filter → Route → Synthesize → Render → Drill-down
 ```
 
 | Step | Module | AI? | Description |
@@ -53,11 +53,12 @@ Source PDFs → Normalize → Chunk → Classify → Triage → Claims → Route
 | 4. **Classify** | `classifier.py` | **Yes** | Tag topic, ticker, content type (descriptive only) |
 | 5. **Triage** | `triage.py` | No | Apply analyst relevance rules, deduplicate |
 | 6. **Extract Claims** | `claim_extractor.py` | **Yes** | Convert chunks to atomic, challengeable claims |
-| 7. **Route Tiers** | `tier_router.py` | No | Assign Tier 1/2/3 using deterministic rules |
-| 8. **Synthesize** | `tier2_synthesizer.py` | **Yes** | Surface agreement, disagreement, deltas |
-| 9. **Index Tier 3** | `implication_router.py` | No | Map claims to coverage (index, not analysis) |
-| 10. **Render** | `briefing_renderer.py` | No | Fixed-format <5 page daily briefing |
-| 11. **Drill-down** | `drilldown.py` | No | Link claims to source text, PDF page, related claims |
+| 7. **Scope Filter** | `scope_filter.py` | No | Filter claims by sector/ticker/analyst scope |
+| 8. **Route Tiers** | `tier_router.py` | No | Assign Tier 1/2/3 using deterministic rules |
+| 9. **Synthesize** | `tier2_synthesizer.py` | **Yes** | Surface agreement, disagreement, deltas |
+| 10. **Index Tier 3** | `implication_router.py` | No | Map claims to coverage (index, not analysis) |
+| 11. **Render** | `briefing_renderer.py` | No | Fixed-format <5 page daily briefing |
+| 12. **Drill-down** | `drilldown.py` | No | Link claims to source text, PDF page, related claims |
 
 ---
 
@@ -76,6 +77,7 @@ Source PDFs → Normalize → Chunk → Classify → Triage → Claims → Route
 | Task | Why Not AI? |
 |------|-------------|
 | **Relevance Decisions** | Analyst-configurable rules in `triage.py`. Deterministic, auditable. |
+| **Sector Scoping** | Rule-based filtering in `scope_filter.py`. Explicit ticker/analyst whitelists. |
 | **Prioritization Logic** | Tier routing is rule-based in `tier_router.py`. No LLM black box. |
 | **Output Formatting** | Template-driven rendering. Consistent every day. |
 | **Conviction or Recommendations** | Humans decide. System describes. |
@@ -149,7 +151,54 @@ Tier 1: time_sensitivity=breaking + belief_pressure=contradicts_consensus
 
 ---
 
+## Sector Scope Filtering
+
+The `scope_filter.py` module ensures briefings stay focused on the analyst's sector (TMT by default). Applied **before tiering**, it prevents non-relevant content from diluting the briefing.
+
+### Scope Configuration
+
+| Field | Purpose | Default |
+|-------|---------|---------|
+| `primary_sector` | Sector umbrella (TMT, ALL) | TMT |
+| `sub_sectors` | Sub-sector filter (technology, media, telecom) | All TMT |
+| `ticker_whitelist` | Only include claims for these tickers | None (all) |
+| `analyst_whitelist` | Only include claims from these analysts | None (all) |
+
+### Built-in Scopes
+
+```python
+# Default: All TMT content
+DEFAULT_TMT_SCOPE = BriefingScope(primary_sector='TMT')
+
+# Internet + Software focus (excludes telecom, limits to coverage tickers)
+INTERNET_SOFTWARE_SCOPE = BriefingScope(
+    primary_sector='TMT',
+    sub_sectors=['technology', 'media'],
+    ticker_whitelist=['META', 'GOOGL', 'AMZN', 'MSFT', 'CRWD', ...]
+)
+```
+
+### Thin Day Detection
+
+When filtered claims fall below threshold (default: 3), the system marks it as a "thin day" with a reason:
+- "No source data available"
+- "No claims within scope"
+- "Low volume within scope"
+
+This prevents the briefing from padding with irrelevant content on low-volume days.
+
+---
+
 ## Supported Inputs
+
+### Multi-Portal Framework
+
+The system uses a **PortalRegistry** to manage multiple sell-side research portals. Each portal has its own scraper that inherits from `BaseScraper`, sharing common functionality:
+
+- **Dynamic cookie refresh** — Authenticate once, cookies persist and auto-refresh
+- **Notification-based discovery** — Pulls from "Followed Notifications" (analysts you follow)
+- **Crash resilience** — One portal failure doesn't crash the entire collection
+- **Unified result format** — All scrapers return the same structure
 
 ### Currently Implemented
 
@@ -157,15 +206,52 @@ Tier 1: time_sensitivity=breaking + belief_pressure=contradicts_consensus
 |--------|--------|-------|
 | **Jefferies Research** | ✅ Working | Selenium scraper with SSO cookie auth |
 
-### Planned (Not Yet Implemented)
+### Planned Sell-Side Portals
+
+| Source | Status | Notes |
+|--------|--------|-------|
+| JP Morgan | 🔲 Template ready | Enable in `config.py`, implement `jpmorgan_scraper.py` |
+| Goldman Sachs | 🔲 Template ready | Enable in `config.py`, implement `goldman_scraper.py` |
+| Morgan Stanley | 🔲 Template ready | Enable in `config.py`, implement `morgan_stanley_scraper.py` |
+
+### Adding a New Portal
+
+1. Create `{portal}_scraper.py` inheriting from `BaseScraper`
+2. Implement required methods: `_check_authentication()`, `_navigate_to_notifications()`, `_extract_notifications()`, etc.
+3. Register in `portal_registry.py`
+4. Enable in `config.py` SOURCES dict
+
+See [base_scraper.py](base_scraper.py) for the abstract interface.
+
+### Podcast Ingestion Framework
+
+The system uses a **PodcastRegistry** to manage multiple podcast sources. Podcasts provide macro context, social sentiment, and market commentary that complements sell-side research.
+
+| Podcast | Hosts | Platform | Transcript Source |
+|---------|-------|----------|-------------------|
+| **All-In Podcast** | Chamath, Jason, Sacks, Friedberg | YouTube | Auto-generated captions |
+| **BG2 Pod** | Brad Gerstner, Bill Gurley | Apple/Spotify | Episode descriptions |
+| **Acquired** | Ben Gilbert, David Rosenthal | acquired.fm | Episode descriptions |
+
+**Key Features:**
+- **YouTube podcasts**: Uses `youtube-transcript-api` for auto-generated transcripts (no API key needed)
+- **RSS podcasts**: Discovers episodes via RSS feed, uses descriptions as content
+- **Episode deduplication**: SQLite-based tracking prevents reprocessing
+- **Pipeline integration**: Episodes flow through same claim extraction as sell-side reports
+
+**Adding a New Podcast:**
+
+1. For YouTube-based podcasts, create class extending `YouTubePodcast` with `CHANNEL_ID`
+2. For RSS-based podcasts, create class extending `RSSPodcast` with `RSS_URL`
+3. Register in `podcast_registry.py`
+4. Enable in `config.py` SOURCES['podcasts']['sources']
+
+### Other Sources (Planned)
 
 | Source | Status | Notes |
 |--------|--------|-------|
 | Substack | 🔲 Placeholder | RSS-based ingestion planned |
 | X (Twitter) | 🔲 Placeholder | API integration planned |
-| YouTube | 🔲 Placeholder | Transcript extraction planned |
-| Podcasts | 🔲 Placeholder | Audio transcription planned |
-| Other sell-side (JPM, etc.) | 🔲 Placeholder | Portal-specific scrapers needed |
 
 ---
 
@@ -244,6 +330,7 @@ financial-news-agent/
 ├── # Relevance & Claims
 ├── triage.py                # Analyst-configurable filtering (no LLM)
 ├── claim_extractor.py       # Chunk → atomic claims with judgment hooks (LLM)
+├── scope_filter.py          # Sector-scoped claim filtering (no LLM)
 │
 ├── # Tier Routing & Synthesis
 ├── tier_router.py           # Rule-based Tier 1/2/3 assignment (no LLM)
@@ -258,10 +345,19 @@ financial-news-agent/
 ├── config.py                # Tickers, analysts, themes
 ├── analyst_config_tmt.py    # TMT analyst-specific config
 │
-├── # Data Ingestion
-├── jefferies_scraper.py     # Selenium-based PDF scraper
-├── cookie_manager.py        # Cookie persistence
+├── # Data Ingestion (Multi-Portal Framework)
+├── base_scraper.py          # Abstract base class for portal scrapers
+├── portal_registry.py       # Registry for managing multiple portals
+├── jefferies_scraper.py     # Jefferies portal scraper (extends BaseScraper)
+├── cookie_manager.py        # Cookie persistence per portal
 ├── report_tracker.py        # SQLite deduplication
+│
+├── # Podcast Ingestion Framework
+├── base_podcast.py          # Abstract base class for podcast handlers
+├── podcast_registry.py      # Registry for managing multiple podcasts
+├── youtube_podcast.py       # YouTube-based podcasts (All-In)
+├── rss_podcast.py           # RSS-based podcasts (BG2, Acquired)
+├── podcast_tracker.py       # SQLite episode deduplication
 │
 ├── requirements.txt
 ├── .env                     # API keys (gitignored)
@@ -299,11 +395,13 @@ NFLX, SPOT, U, APP, RBLX, ORCL, PLTR, SHOP
 - [x] LLM classification (topic, ticker, content type)
 - [x] Analyst-configurable triage with deduplication
 - [x] Claim extraction with judgment hooks
+- [x] Sector-scoped claim filtering (ticker/analyst whitelists)
 - [x] Rule-based tier routing (Tier 1/2/3)
 - [x] Tier 2 synthesis (agreement/disagreement/deltas)
 - [x] Tier 3 implication indexing
 - [x] <5 page briefing renderer
 - [x] Drill-down integrity (full claim provenance)
+- [x] Podcast ingestion (All-In, BG2 Pod, Acquired)
 - [ ] End-to-end pipeline integration test
 - [ ] Substack ingestion
 - [ ] Email delivery

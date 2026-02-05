@@ -115,6 +115,32 @@ class CookieManager:
         """List all portals with stored cookies"""
         return list(self.cookies.keys())
 
+    def update_cookies_from_driver(self, portal_name: str, driver_cookies: list):
+        """
+        Update cookies from Selenium WebDriver cookies list.
+
+        Args:
+            portal_name: Name of the portal
+            driver_cookies: List of cookie dicts from driver.get_cookies()
+        """
+        if not driver_cookies:
+            return
+
+        # Extract name-value pairs from driver cookies
+        new_cookies = {}
+        for cookie in driver_cookies:
+            name = cookie.get('name')
+            value = cookie.get('value')
+            if name and value:
+                new_cookies[name] = value
+
+        # Merge with existing cookies
+        existing = self.get_cookies(portal_name) or {}
+        existing.update(new_cookies)
+
+        # Save updated cookies
+        self.save_cookies(portal_name, existing)
+
 
 def import_cookies_from_browser(portal_name: str, cookie_dict: Dict):
     """

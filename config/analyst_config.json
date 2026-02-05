@@ -17,8 +17,9 @@
   },
 
   "trusted_analysts": {
-    "_doc": "Claims from trusted analysts bypass novelty filters. Map: source -> analyst names.",
-    "jefferies": ["Brent Thill", "Joseph Gallo"]
+    "_doc": "DEPRECATED: Now uses portal's Followed Notifications. Analysts you follow in the portal ARE your trusted analysts. This field kept for reference only.",
+    "_note": "Follow analysts directly in each portal (Jefferies, etc.) - the scraper will pull from your followed list automatically.",
+    "jefferies": ["(dynamic - uses portal follows)"]
   },
 
   "themes": {

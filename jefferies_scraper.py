@@ -1,15 +1,15 @@
 """
 Jefferies Research Portal Scraper
 
-Workflow (matches user's manual process):
+Workflow (Followed Notifications approach):
 1. Login (via cookies)
-2. Navigate to Advanced Search > Analysts/Authors
-3. Type analyst name in search box
-4. Click matching analyst name from dropdown
-5. Click SEARCH
-6. Get list of reports (sorted by date, most recent first)
-7. Click into each report → click "Print PDF" → download PDF
-8. Filter: last 5 days only, skip previously processed reports
+2. Click "Followed Notifications" bell icon
+3. Get list of report notifications from followed analysts
+4. Click each notification → go directly to report page
+5. Extract content (direct text or PDF fallback)
+6. Filter: last 7 days only, skip previously processed reports
+
+Inherits from BaseScraper for shared cookie/auth/PDF functionality.
 """
 
 import requests
@@ -17,39 +17,48 @@ from bs4 import BeautifulSoup
 import PyPDF2
 import pdfplumber
 import io
+import os
 import re
 import time
+import hashlib
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from cookie_manager import CookieManager
 from report_tracker import ReportTracker
+from base_scraper import BaseScraper
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from dateutil import parser as dateparser
 
 
-class JefferiesScraper:
-    """Scraper for Jefferies research portal"""
+class JefferiesScraper(BaseScraper):
+    """Scraper for Jefferies research portal using Followed Notifications"""
 
+    # Required by BaseScraper
+    PORTAL_NAME = "jefferies"
     CONTENT_URL = "https://content.jefferies.com"
+    PDF_STORAGE_DIR = "data/reports/jefferies"
 
     def __init__(self, headless: bool = True):
-        self.cookie_manager = CookieManager()
-        self.report_tracker = ReportTracker()
-        self.session = requests.Session()
-        self.headless = headless
-        self.driver = None
+        super().__init__(headless=headless)
 
     # ------------------------------------------------------------------
     # Browser setup
     # ------------------------------------------------------------------
 
-    def _init_driver(self):
-        """Initialize Chrome WebDriver and load cookies"""
+    def _init_driver(self) -> bool:
+        """
+        Initialize Chrome WebDriver, load cookies, and verify authentication.
+
+        Returns:
+            True if driver initialized and authenticated, False if auth failed
+        """
         if self.driver:
-            return
+            return True
 
         chrome_options = Options()
         if self.headless:
@@ -62,7 +71,7 @@ class JefferiesScraper:
         self.driver = webdriver.Chrome(options=chrome_options)
         print("✓ Initialized Chrome WebDriver")
 
-        # Step 1: Load cookies into browser for authentication
+        # Load cookies for authentication
         self.driver.get(self.CONTENT_URL)
         time.sleep(2)
 
@@ -76,268 +85,391 @@ class JefferiesScraper:
                         'domain': '.jefferies.com'
                     })
                 except Exception:
-                    pass  # Skip cookies that can't be set
-            print("✓ Loaded cookies into browser (Step 1: Login)")
+                    pass
+            print("✓ Loaded cookies into browser")
 
         self.driver.refresh()
         time.sleep(2)
 
+        # Preflight authentication check
+        if not self._check_authentication():
+            print("✗ Authentication failed - manual login required")
+            return False
+
+        return True
+
     def close_driver(self):
         """Close the Selenium WebDriver"""
         if self.driver:
+            # Persist cookies before closing
+            self._persist_cookies()
             self.driver.quit()
             self.driver = None
             print("✓ Closed WebDriver")
 
     # ------------------------------------------------------------------
-    # Step 2-5: Advanced Search by Analyst
+    # Authentication & Session Management
     # ------------------------------------------------------------------
 
-    def search_by_analyst(self, analyst_name: str, max_results: int = 20) -> List[Dict]:
+    def _check_authentication(self) -> bool:
         """
-        Steps 2-6: Navigate to Advanced Search, filter by analyst, get report list.
-
-        Args:
-            analyst_name: e.g. "Brent Thill"
-            max_results: Max reports to return
+        Preflight authentication check.
+        Validates access by checking URL and page content.
 
         Returns:
-            List of report metadata dicts (url, title, date, analyst)
+            True if authenticated, False if reauthentication needed
         """
-        print(f"\n{'='*50}")
-        print(f"Searching for reports by: {analyst_name}")
-        print(f"{'='*50}")
-
-        self._init_driver()
-
-        # Step 2: Navigate directly to Advanced Search URL (clean slate)
-        self.driver.get(self.CONTENT_URL + "/advsearch")
-        time.sleep(3)
-
-        # Click CLEAR ALL to reset any previous filters
-        self._click_clear_all()
-        time.sleep(1)
-
-        # Step 3: Expand Analysts/Authors panel and type name
-        if not self._enter_analyst_name(analyst_name):
-            print("✗ Could not enter analyst name")
-            return []
-
-        # Step 4: Click matching option from dropdown (handled in _enter_analyst_name)
-
-        # Step 5: Click SEARCH
-        if not self._click_search_button():
-            print("✗ Could not click SEARCH button")
-            return []
-
-        # Step 6: Extract report list from results
-        reports = self._extract_report_list(analyst_name, max_results)
-        print(f"✓ Found {len(reports)} reports by {analyst_name}")
-
-        return reports
-
-    def _click_clear_all(self) -> bool:
-        """Click CLEAR ALL button to reset filters between searches"""
         try:
-            all_buttons = self.driver.find_elements(By.CSS_SELECTOR, 'button.v-btn, button')
-            for btn in all_buttons:
-                btn_text = btn.text.strip().upper()
-                if 'CLEAR' in btn_text:
-                    self.driver.execute_script("arguments[0].click();", btn)
-                    print("  ✓ Reset filters (CLEAR ALL)")
-                    time.sleep(1)
-                    return True
-        except Exception:
-            pass
-        return False
+            self.driver.get(self.CONTENT_URL)
+            time.sleep(3)
 
-    def _find_and_click_adv_search(self) -> bool:
-        """Step 2: Find and click ADV SEARCH link (legacy, now navigating directly)"""
-        try:
-            # Try exact match first
-            links = self.driver.find_elements(By.LINK_TEXT, 'ADV SEARCH')
-            if not links:
-                links = self.driver.find_elements(By.PARTIAL_LINK_TEXT, 'ADV')
-            if links:
-                links[0].click()
-                print("✓ Step 2: Navigated to Advanced Search")
-                return True
-        except Exception as e:
-            print(f"  Error navigating to Advanced Search: {e}")
-        return False
+            current_url = self.driver.current_url.lower()
+            page_title = self.driver.title.lower()
 
-    def _enter_analyst_name(self, analyst_name: str) -> bool:
-        """Steps 3-4: Expand panel, type name, click matching dropdown option"""
-        try:
-            # Find the Analysts/Authors expansion panel
-            panels = self.driver.find_elements(By.CSS_SELECTOR, '.v-expansion-panel')
-            analyst_panel = None
-            for panel in panels:
-                if 'Analysts/Authors' in panel.text:
-                    analyst_panel = panel
-                    break
+            # Check URL for SSO/login redirects (strongest signal)
+            login_url_indicators = [
+                'oneclient.jefferies.com',  # SSO redirect
+                'sso', 'saml', 'login', 'signin', 'authenticate'
+            ]
+            for indicator in login_url_indicators:
+                if indicator in current_url:
+                    print(f"✗ Authentication check: redirected to login ({indicator} in URL)")
+                    print(f"  Session cookies expired - manual re-authentication required")
+                    return False
 
-            if not analyst_panel:
-                print("  ✗ Could not find Analysts/Authors panel")
+            # Check page title for login indicators
+            if 'sign in' in page_title or 'login' in page_title:
+                print(f"✗ Authentication check: login page detected (title: {page_title})")
+                print(f"  Session cookies expired - manual re-authentication required")
                 return False
 
-            # Click to expand the panel
-            header = analyst_panel.find_element(By.CSS_SELECTOR, '.v-expansion-panel-title')
-            self.driver.execute_script("arguments[0].click();", header)
-            print("  ✓ Step 3: Expanded Analysts/Authors panel")
-            time.sleep(2)
+            # Check page content
+            page_source = self.driver.page_source.lower()
 
-            # Find the text input inside the panel
-            search_inputs = analyst_panel.find_elements(By.CSS_SELECTOR, 'input[type="text"]')
-            if not search_inputs:
-                # Try broader search for visible inputs
-                search_inputs = self.driver.find_elements(By.CSS_SELECTOR, 'input[type="text"]')
-                search_inputs = [inp for inp in search_inputs if inp.is_displayed()]
-
-            if not search_inputs:
-                print("  ✗ Could not find analyst search input")
-                return False
-
-            # Type the analyst name
-            input_field = search_inputs[-1]  # Usually the last visible input
-            input_field.clear()
-            input_field.send_keys(analyst_name)
-            print(f"  ✓ Step 3: Typed '{analyst_name}' in search box")
-            time.sleep(3)  # Wait for autocomplete dropdown
-
-            # Step 4: Click on the matching dropdown option
-            dropdown_options = self.driver.find_elements(By.CSS_SELECTOR,
-                '.v-list-item, [role="option"], [role="listbox"] .v-list-item')
-
-            for option in dropdown_options:
-                if analyst_name.lower() in option.text.lower():
-                    self.driver.execute_script("arguments[0].click();", option)
-                    print(f"  ✓ Step 4: Selected analyst: {option.text.strip()[:60]}")
-                    time.sleep(3)
+            # Signs of being authenticated - look for UI elements only visible when logged in
+            auth_indicators = [
+                'notification', 'followed', 'my research',
+                'profile', 'logout', 'sign out'
+            ]
+            for indicator in auth_indicators:
+                if indicator in page_source:
+                    print("✓ Authentication check: valid session")
                     return True
 
-            # Fallback: press Enter if no dropdown match
-            print("  ⚠ No dropdown match found, pressing Enter")
-            input_field.send_keys(Keys.RETURN)
-            time.sleep(1)
-            return True
-
-        except Exception as e:
-            print(f"  ✗ Error entering analyst name: {e}")
-            return False
-
-    def _click_search_button(self) -> bool:
-        """Step 5: Click the SEARCH button below all filter panels"""
-        try:
-            # Scroll to the bottom of the filter section to make SEARCH visible
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1)
-
-            # The SEARCH button is outside/below all the filter panels.
-            # It's alongside CLEAR ALL, PREVIOUS SEARCH, SAVE AS FILTER, SHARE FILTER.
-            # Look for a group of buttons and find the one that says SEARCH.
-            all_buttons = self.driver.find_elements(By.CSS_SELECTOR, 'button.v-btn, button')
-
-            search_btn = None
-            for btn in all_buttons:
-                btn_text = btn.text.strip()
-                if btn_text == 'SEARCH':
-                    search_btn = btn
-                    break
-
-            if not search_btn:
-                # Fallback: XPath
-                candidates = self.driver.find_elements(By.XPATH,
-                    "//button[normalize-space(.)='SEARCH']")
-                if candidates:
-                    search_btn = candidates[0]
-
-            if search_btn:
-                # Scroll into view and click
-                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", search_btn)
-                time.sleep(0.5)
-                self.driver.execute_script("arguments[0].click();", search_btn)
-                print("  ✓ Step 5: Clicked SEARCH button (below filters)")
-                time.sleep(5)  # Wait for filtered results to load
+            # Also check for actual research content
+            if 'research' in page_source and 'content.jefferies.com' in current_url:
+                print("✓ Authentication check: research content accessible")
                 return True
-            else:
-                print("  ✗ Could not find SEARCH button below filters")
-                return False
 
-        except Exception as e:
-            print(f"  ✗ Error clicking SEARCH: {e}")
+            # If we're on content.jefferies.com but no auth indicators, proceed cautiously
+            if 'content.jefferies.com' in current_url:
+                print("⚠ Authentication check: on portal but ambiguous state, proceeding")
+                return True
+
+            # Not on portal and no auth indicators = likely not authenticated
+            print(f"✗ Authentication check: not on portal (URL: {current_url[:60]})")
             return False
 
-    def _extract_report_list(self, analyst_name: str, max_results: int) -> List[Dict]:
-        """Step 6: Extract report links and dates from search results"""
-        soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-        reports = []
+        except Exception as e:
+            print(f"✗ Authentication check error: {e}")
+            return False
 
-        # Find report links (format: /report/<uuid>)
-        report_links = soup.find_all('a', href=re.compile(r'/report/'))
-
-        for link in report_links[:max_results]:
-            href = link.get('href', '')
-            if not href or 'not-entitled' in href:
-                continue  # Skip reports we can't access
-
-            # Make URL absolute
-            if not href.startswith('http'):
-                href = self.CONTENT_URL + href
-
-            # Get title text
-            title = link.text.strip()
-            if not title:
-                title = link.get('title', 'Untitled')
-
-            # Parse publication date from title/surrounding text
-            pub_date = self._parse_date(title)
-
-            reports.append({
-                'title': title,
-                'url': href,
-                'analyst': analyst_name,
-                'source': 'Jefferies',
-                'date': pub_date.strftime('%Y-%m-%d') if pub_date else None,
-            })
-
-        return reports
-
-    # ------------------------------------------------------------------
-    # Step 7: Navigate to report page and get PDF
-    # ------------------------------------------------------------------
-
-    def get_pdf_url(self, report_url: str) -> Optional[str]:
+    def _persist_cookies(self):
         """
-        Step 7: Navigate to report page and extract PDF URL from the iframe.
-        The iframe src contains an authenticated /doc/html/ URL; we swap to /doc/pdf/
-        to get the actual PDF binary.
+        Save updated cookies from browser session.
+        Called after scraping operations to persist dynamic updates.
         """
         if not self.driver:
+            return
+
+        try:
+            driver_cookies = self.driver.get_cookies()
+            if driver_cookies:
+                self.cookie_manager.update_cookies_from_driver('jefferies', driver_cookies)
+                print("✓ Persisted updated session cookies")
+        except Exception as e:
+            print(f"⚠ Failed to persist cookies: {e}")
+
+    def _handle_auth_failure(self) -> Dict:
+        """
+        Handle authentication failure gracefully.
+
+        Returns:
+            Dict with empty reports and auth failure message
+        """
+        return {
+            'reports': [],
+            'failures': ['Authentication required - manual login needed'],
+            'auth_required': True
+        }
+
+    # ------------------------------------------------------------------
+    # Step 2: Click Followed Notifications (bell icon)
+    # ------------------------------------------------------------------
+
+    def _click_notifications_bell(self) -> bool:
+        """Click the Followed Notifications bell icon in top right"""
+        try:
+            # Look for bell icon - common selectors
+            bell_selectors = [
+                '[aria-label*="notification"]',
+                '[aria-label*="Notification"]',
+                '[title*="notification"]',
+                '[title*="Notification"]',
+                '[title*="Followed"]',
+                '.notification-bell',
+                '.v-badge',  # Vuetify badge (often wraps notification icons)
+                'button[class*="notification"]',
+                # Icon-based (mdi = Material Design Icons, common in Vuetify)
+                '.mdi-bell',
+                '[class*="bell"]',
+            ]
+
+            for selector in bell_selectors:
+                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                for el in elements:
+                    if el.is_displayed():
+                        self.driver.execute_script("arguments[0].click();", el)
+                        print("✓ Clicked Followed Notifications bell")
+                        time.sleep(3)
+                        return True
+
+            # Fallback: look for any clickable element with "notification" or "followed" text
+            all_clickable = self.driver.find_elements(By.CSS_SELECTOR, 'button, a, [role="button"]')
+            for el in all_clickable:
+                try:
+                    text = el.get_attribute('aria-label') or el.get_attribute('title') or el.text or ''
+                    if 'notif' in text.lower() or 'followed' in text.lower() or 'bell' in text.lower():
+                        if el.is_displayed():
+                            self.driver.execute_script("arguments[0].click();", el)
+                            print(f"✓ Clicked notifications element: {text[:40]}")
+                            time.sleep(3)
+                            return True
+                except:
+                    continue
+
+            print("✗ Could not find notifications bell icon")
+            return False
+
+        except Exception as e:
+            print(f"✗ Error clicking notifications: {e}")
+            return False
+
+    def _navigate_to_notifications(self) -> bool:
+        """
+        Navigate to notifications section.
+        Required by BaseScraper interface - delegates to _click_notifications_bell.
+        """
+        return self._click_notifications_bell()
+
+    # ------------------------------------------------------------------
+    # Step 3: Extract notification items (reports from followed analysts)
+    # ------------------------------------------------------------------
+
+    def _extract_notifications(self) -> List[Dict]:
+        """Extract ALL report notifications from the notifications panel"""
+        notifications = []
+        seen_urls = set()
+
+        try:
+            # Scroll within notifications panel to load all items
+            # Try multiple scroll attempts to get everything
+            for scroll_attempt in range(5):
+                time.sleep(2)
+
+                # Get page source and parse
+                soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+
+                # Find all report links
+                report_links = soup.find_all('a', href=re.compile(r'/report/'))
+
+                for link in report_links:
+                    href = link.get('href', '')
+                    if not href or 'not-entitled' in href:
+                        continue
+
+                    # Make URL absolute
+                    if not href.startswith('http'):
+                        href = self.CONTENT_URL + href
+
+                    # Skip duplicates
+                    if href in seen_urls:
+                        continue
+                    seen_urls.add(href)
+
+                    # Extract title and metadata
+                    title = link.text.strip()
+                    if not title:
+                        title = link.get('title', 'Untitled')
+
+                    # Try to find analyst name from surrounding context
+                    parent = link.find_parent(['div', 'li', 'article'])
+                    analyst = self._extract_analyst_from_element(parent) if parent else None
+
+                    # Parse date
+                    pub_date = self._parse_date(title)
+                    if not pub_date and parent:
+                        pub_date = self._parse_date(parent.text)
+
+                    notifications.append({
+                        'title': title[:200],
+                        'url': href,
+                        'analyst': analyst,
+                        'source': 'Jefferies',
+                        'date': pub_date.strftime('%Y-%m-%d') if pub_date else None,
+                    })
+
+                # Scroll down in the notifications panel to load more
+                try:
+                    self.driver.execute_script(
+                        "document.querySelector('.v-navigation-drawer__content, .v-list, [role=\"list\"]')?.scrollBy(0, 500)"
+                    )
+                except:
+                    self.driver.execute_script("window.scrollBy(0, 300)")
+
+            print(f"✓ Found {len(notifications)} notifications (all loaded)")
+            return notifications
+
+        except Exception as e:
+            print(f"✗ Error extracting notifications: {e}")
+            return []
+
+    def _extract_analyst_from_element(self, element) -> Optional[str]:
+        """Try to extract analyst name from a notification element"""
+        if not element:
             return None
 
-        self.driver.get(report_url)
-        time.sleep(8)
-
-        # The report is rendered in an iframe with an authenticated links2 URL
-        iframes = self.driver.find_elements(By.TAG_NAME, 'iframe')
-        for iframe in iframes:
-            src = iframe.get_attribute('src') or ''
-            if 'links2' in src.lower():
-                # iframe serves HTML; swap to /doc/pdf/ for the actual PDF
-                pdf_src = src.replace('/doc/html/', '/doc/pdf/')
-                print(f"    ✓ PDF URL: {pdf_src[:80]}")
-                return pdf_src
-
-        # Fallback: check page source for links2 URLs
-        links2_urls = re.findall(r'(https?://[^\s"\']*links2/doc/[^\s"\']*)', self.driver.page_source)
-        for url in links2_urls:
-            pdf_url = url.replace('/doc/html/', '/doc/pdf/')
-            print(f"    ✓ PDF URL (fallback): {pdf_url[:80]}")
-            return pdf_url
-
-        print("    ✗ Could not find PDF URL on report page")
+        text = element.text
+        # Common patterns: "by Analyst Name" or "Analyst Name - Topic"
+        patterns = [
+            r'by\s+([A-Z][a-z]+\s+[A-Z][a-z]+)',
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+)\s*[-–]\s*\w+',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
         return None
+
+    # ------------------------------------------------------------------
+    # Step 4-5: Navigate to report and extract content
+    # ------------------------------------------------------------------
+
+    def _navigate_to_report(self, report_url: str) -> bool:
+        """Navigate to a specific report page"""
+        try:
+            self.driver.get(report_url)
+            time.sleep(5)  # Wait for page to load
+            return True
+        except Exception as e:
+            print(f"    ✗ Error navigating to report: {e}")
+            return False
+
+    def _extract_report_content(self, report: Dict = None) -> Optional[str]:
+        """Extract content from current report page (direct text or PDF)"""
+
+        # Method 1: Try to extract text directly from the page
+        text = self._extract_text_from_page()
+        if text and len(text) > 500:
+            print(f"    ✓ Extracted {len(text)} chars directly from page")
+            return text
+
+        # Method 2: Get PDF URL and download
+        pdf_url = self._get_pdf_url()
+        if pdf_url:
+            self._sync_cookies_from_driver()
+            pdf_bytes = self.download_pdf(pdf_url)
+            if pdf_bytes:
+                # Save PDF to disk for historical access
+                if report:
+                    pdf_path = self._save_pdf(pdf_bytes, report)
+                    if pdf_path:
+                        report['pdf_path'] = pdf_path
+
+                text = self.extract_text_from_pdf(pdf_bytes)
+                if text:
+                    return text
+
+        return None
+
+    def _extract_text_from_page(self) -> Optional[str]:
+        """Try to extract report text directly from the page"""
+        try:
+            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+
+            # Remove script/style elements
+            for element in soup(['script', 'style', 'nav', 'header', 'footer']):
+                element.decompose()
+
+            # Look for main content container
+            content_selectors = [
+                '.report-content',
+                '.document-content',
+                '.article-content',
+                'article',
+                'main',
+                '[role="main"]',
+                '.v-main',
+            ]
+
+            for selector in content_selectors:
+                content = soup.select_one(selector)
+                if content:
+                    text = content.get_text(separator='\n', strip=True)
+                    if len(text) > 500:
+                        return text
+
+            # Fallback: get all text from body
+            body = soup.find('body')
+            if body:
+                text = body.get_text(separator='\n', strip=True)
+                # Filter out likely navigation/UI text
+                lines = [l for l in text.split('\n') if len(l) > 50]
+                if lines:
+                    return '\n'.join(lines)
+
+            return None
+
+        except Exception as e:
+            print(f"    ⚠ Error extracting page text: {e}")
+            return None
+
+    def _get_pdf_url(self) -> Optional[str]:
+        """Get PDF URL from the report page (iframe src or Print PDF button)"""
+        try:
+            # Check iframes for PDF link
+            iframes = self.driver.find_elements(By.TAG_NAME, 'iframe')
+            for iframe in iframes:
+                src = iframe.get_attribute('src') or ''
+                if 'links2' in src.lower() or 'doc' in src.lower():
+                    pdf_src = src.replace('/doc/html/', '/doc/pdf/')
+                    print(f"    ✓ PDF URL from iframe: {pdf_src[:60]}...")
+                    return pdf_src
+
+            # Look for Print PDF button
+            pdf_buttons = self.driver.find_elements(By.XPATH,
+                "//*[contains(text(), 'Print PDF') or contains(text(), 'PDF') or contains(@aria-label, 'PDF')]")
+            for btn in pdf_buttons:
+                if btn.is_displayed():
+                    # Click and capture the PDF URL
+                    self.driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(2)
+                    # Check for new window/tab or download link
+                    # For now, just look for links2 URLs in page source
+                    break
+
+            # Fallback: search page source for PDF URLs
+            links2_urls = re.findall(r'(https?://[^\s"\']*links2/doc/[^\s"\']*)', self.driver.page_source)
+            for url in links2_urls:
+                pdf_url = url.replace('/doc/html/', '/doc/pdf/')
+                print(f"    ✓ PDF URL from source: {pdf_url[:60]}...")
+                return pdf_url
+
+            return None
+
+        except Exception as e:
+            print(f"    ⚠ Error getting PDF URL: {e}")
+            return None
 
     # ------------------------------------------------------------------
     # PDF download and text extraction
@@ -363,6 +495,61 @@ class JefferiesScraper:
                 return None
         except Exception as e:
             print(f"    ✗ Error downloading PDF: {e}")
+            return None
+
+    def _save_pdf(self, pdf_content: bytes, report: Dict) -> Optional[str]:
+        """
+        Save PDF to disk with categorized file structure.
+
+        Structure: data/reports/jefferies/YYYY-MM/analyst_name/report_hash.pdf
+        Also saves metadata JSON alongside each PDF.
+
+        Returns: Path to saved PDF or None if failed
+        """
+        try:
+            # Get date for folder structure
+            pub_date = report.get('date') or datetime.now().strftime('%Y-%m-%d')
+            year_month = pub_date[:7]  # YYYY-MM
+
+            # Sanitize analyst name for folder
+            analyst = report.get('analyst') or 'unknown'
+            analyst_folder = re.sub(r'[^\w\s-]', '', analyst).strip().replace(' ', '_').lower()
+
+            # Create directory structure
+            dir_path = os.path.join(self.PDF_STORAGE_DIR, year_month, analyst_folder)
+            os.makedirs(dir_path, exist_ok=True)
+
+            # Generate filename from URL hash (ensures uniqueness)
+            url_hash = hashlib.md5(report.get('url', '').encode()).hexdigest()[:12]
+            title_slug = re.sub(r'[^\w\s-]', '', report.get('title', '')[:30]).strip().replace(' ', '_').lower()
+            filename = f"{pub_date}_{title_slug}_{url_hash}"
+
+            pdf_path = os.path.join(dir_path, f"{filename}.pdf")
+            meta_path = os.path.join(dir_path, f"{filename}.json")
+
+            # Save PDF
+            with open(pdf_path, 'wb') as f:
+                f.write(pdf_content)
+
+            # Save metadata
+            metadata = {
+                'url': report.get('url'),
+                'title': report.get('title'),
+                'analyst': analyst,
+                'source': report.get('source'),
+                'publish_date': pub_date,
+                'scraped_at': datetime.now().isoformat(),
+                'pdf_size_bytes': len(pdf_content),
+                'pdf_path': pdf_path,
+            }
+            with open(meta_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            print(f"    ✓ Saved PDF: {pdf_path}")
+            return pdf_path
+
+        except Exception as e:
+            print(f"    ⚠ Failed to save PDF: {e}")
             return None
 
     def extract_text_from_pdf(self, pdf_content: bytes) -> str:
@@ -412,7 +599,7 @@ class JefferiesScraper:
             pass
         return None
 
-    def filter_by_date(self, reports: List[Dict], days: int = 5) -> List[Dict]:
+    def filter_by_date(self, reports: List[Dict], days: int = 7) -> List[Dict]:
         """Keep only reports published within the last N days"""
         cutoff = datetime.now() - timedelta(days=days)
         recent = []
@@ -432,86 +619,136 @@ class JefferiesScraper:
         return recent
 
     # ------------------------------------------------------------------
-    # Main orchestration (Step 8: full pipeline)
+    # Main orchestration
     # ------------------------------------------------------------------
 
-    def get_reports_by_analysts(self, analyst_names: List[str],
-                                max_per_analyst: int = 10,
-                                days: int = 5) -> Dict:
+    def get_followed_reports(self, max_reports: int = 20, days: int = 7) -> Dict:
         """
-        Full pipeline: search analysts → filter by date → skip processed → extract PDFs.
+        Full pipeline: notifications → filter → extract content.
 
         Args:
-            analyst_names: List of analyst names to search
-            max_per_analyst: Max reports per analyst to fetch
+            max_reports: Max reports to fetch
             days: Only include reports from last N days
 
         Returns:
-            Dict with 'reports' (list) and 'failures' (list of failed analyst names)
+            Dict with 'reports' (list), 'failures' (list of error messages),
+            and optionally 'auth_required' (bool) if reauthentication needed
         """
-        all_reports = []
-        failed_analysts = []
+        failures = []
+
+        print(f"\n{'='*50}")
+        print("Fetching reports from Followed Notifications")
+        print(f"{'='*50}")
 
         try:
-            # Steps 2-6: Search for each analyst
-            for analyst in analyst_names:
-                reports = self.search_by_analyst(analyst, max_per_analyst)
-                if reports:
-                    all_reports.extend(reports)
-                else:
-                    failed_analysts.append(analyst)
-                    print(f"  ⚠ No reports retrieved for {analyst}")
+            # Initialize driver with authentication check
+            if not self._init_driver():
+                return self._handle_auth_failure()
+
+            # Navigate to main page
+            try:
+                self.driver.get(self.CONTENT_URL)
+                time.sleep(3)
+            except Exception as e:
+                failures.append(f"Failed to navigate to portal: {e}")
+                return {'reports': [], 'failures': failures}
+
+            # Step 2: Click notifications bell
+            if not self._click_notifications_bell():
+                failures.append("Could not access Followed Notifications")
+                # Persist cookies even on failure
+                self._persist_cookies()
+                return {'reports': [], 'failures': failures}
+
+            # Step 3: Extract ALL notification items (no limit)
+            try:
+                notifications = self._extract_notifications()
+            except Exception as e:
+                failures.append(f"Failed to extract notifications: {e}")
+                notifications = []
+
+            if not notifications:
+                failures.append("No notifications found (check followed analysts)")
+                self._persist_cookies()
+                return {'reports': [], 'failures': failures}
 
             print(f"\n{'='*50}")
-            print(f"Total reports found: {len(all_reports)}")
+            print(f"Found {len(notifications)} notifications")
 
-            # Step 8a: Filter to last 5 days
-            recent_reports = self.filter_by_date(all_reports, days=days)
+            # Filter by date
+            recent = self.filter_by_date(notifications, days=days)
 
-            # Step 8b: Skip previously processed reports
-            new_reports = self.report_tracker.filter_unprocessed(recent_reports)
-            skipped = len(recent_reports) - len(new_reports)
+            # Filter out already processed
+            new_reports = self.report_tracker.filter_unprocessed(recent)
+            skipped = len(recent) - len(new_reports)
             if skipped:
                 print(f"  ✓ Skipped {skipped} previously processed reports")
             print(f"  → {len(new_reports)} new reports to process")
 
             if not new_reports:
                 print("\n✓ No new reports to process")
-                return {'reports': [], 'failures': failed_analysts}
+                self._persist_cookies()
+                return {'reports': [], 'failures': failures}
 
-            # Sync browser cookies to requests session for PDF downloads
+            # Sync cookies for PDF downloads
             self._sync_cookies_from_driver()
 
-            # Steps 6-7: Download and extract PDFs
+            # Step 4-5: Process each report with isolated error handling
             processed = []
             for i, report in enumerate(new_reports, 1):
-                print(f"\n  [{i}/{len(new_reports)}] {report['title'][:60]}")
+                try:
+                    print(f"\n  [{i}/{len(new_reports)}] {report['title'][:60]}")
 
-                # Step 7: Get PDF URL directly from report UUID
-                pdf_url = self.get_pdf_url(report['url'])
-                if not pdf_url:
+                    if not self._navigate_to_report(report['url']):
+                        failures.append(f"Failed to navigate: {report['title'][:40]}")
+                        continue
+
+                    content = self._extract_report_content(report)
+                    if content:
+                        report['content'] = content
+                        processed.append(report)
+                        self.report_tracker.mark_as_processed(report)
+                    else:
+                        failures.append(f"Failed to extract: {report['title'][:40]}")
+
+                except Exception as e:
+                    # Isolate failure - don't crash the entire run
+                    failures.append(f"Error processing {report.get('title', 'unknown')[:30]}: {e}")
+                    print(f"    ⚠ Skipping report due to error: {e}")
                     continue
 
-                # Download and extract text
-                pdf_bytes = self.download_pdf(pdf_url)
-                if not pdf_bytes:
-                    continue
-
-                text = self.extract_text_from_pdf(pdf_bytes)
-                if text:
-                    report['content'] = text
-                    report['pdf_url'] = pdf_url
-                    processed.append(report)
-                    self.report_tracker.mark_as_processed(report)
+                # Persist cookies periodically (every 5 reports)
+                if i % 5 == 0:
+                    self._persist_cookies()
 
             print(f"\n{'='*50}")
             print(f"✓ Successfully extracted {len(processed)} reports")
-            if failed_analysts:
-                print(f"⚠ Failed to retrieve reports from: {', '.join(failed_analysts)}")
-            return {'reports': processed, 'failures': failed_analysts}
+            if failures:
+                print(f"⚠ {len(failures)} failures")
+            return {'reports': processed, 'failures': failures}
+
+        except Exception as e:
+            # Top-level crash resilience
+            failures.append(f"Scraper error: {e}")
+            print(f"✗ Scraper error: {e}")
+            return {'reports': [], 'failures': failures}
 
         finally:
             self.close_driver()
+
+    # ------------------------------------------------------------------
+    # Legacy method for backward compatibility
+    # ------------------------------------------------------------------
+
+    def get_reports_by_analysts(self, analyst_names: List[str] = None,
+                                max_per_analyst: int = 10,
+                                days: int = 7) -> Dict:
+        """
+        Backward-compatible wrapper. Now uses Followed Notifications.
+        analyst_names parameter is ignored - follows are determined by user's portal settings.
+        """
+        print("  ℹ Using Followed Notifications (analyst_names param ignored)")
+        return self.get_followed_reports(max_reports=max_per_analyst * 2, days=days)
 
 
 # ------------------------------------------------------------------
@@ -519,23 +756,72 @@ class JefferiesScraper:
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from config import TRUSTED_ANALYSTS
+    import sys
 
-    print("\nJefferies Scraper Test\n" + "=" * 50)
+    print("\nJefferies Scraper Test (Followed Notifications)")
+    print("=" * 50)
 
+    # Test 1: CookieManager Selenium integration
+    print("\n[1/3] Testing CookieManager.update_cookies_from_driver...")
+    cm = CookieManager()
+    test_driver_cookies = [
+        {'name': 'test_session', 'value': 'abc123'},
+        {'name': 'test_csrf', 'value': 'xyz789'}
+    ]
+    cm.update_cookies_from_driver('test_portal', test_driver_cookies)
+    saved = cm.get_cookies('test_portal')
+    assert saved is not None, "Cookies should be saved"
+    assert saved.get('test_session') == 'abc123', "Session cookie should match"
+    assert saved.get('test_csrf') == 'xyz789', "CSRF cookie should match"
+    cm.delete_cookies('test_portal')  # Cleanup
+    print("✓ CookieManager.update_cookies_from_driver works")
+
+    # Test 2: Scraper initialization
+    print("\n[2/3] Testing scraper session management...")
     scraper = JefferiesScraper(headless=False)  # headless=False to see browser
+    assert scraper.cookie_manager is not None, "Cookie manager should be initialized"
+    assert scraper.report_tracker is not None, "Report tracker should be initialized"
+    print("✓ Scraper session management initialized")
 
-    analysts = TRUSTED_ANALYSTS.get('jefferies', [])
-    print(f"Trusted analysts: {', '.join(analysts)}")
-    print(f"Filter: last 5 days, skip previously processed\n")
+    # Test 3: Full pipeline with auth check
+    print("\n[3/3] Testing full pipeline...")
+    print("Using Followed Notifications to get reports")
+    print("Filter: last 7 days, skip previously processed\n")
 
-    reports = scraper.get_reports_by_analysts(analysts, max_per_analyst=5, days=5)
+    result = scraper.get_followed_reports(max_reports=10, days=7)
+
+    # Validate result structure
+    assert 'reports' in result, "Result should have 'reports' key"
+    assert 'failures' in result, "Result should have 'failures' key"
+    assert isinstance(result['reports'], list), "Reports should be a list"
+    assert isinstance(result['failures'], list), "Failures should be a list"
+    print("✓ Result structure validated")
+
+    # Check for auth_required flag
+    if result.get('auth_required'):
+        print("\n⚠ Authentication required - manual login needed")
+        print("  Run browser manually, login, then re-export cookies")
+        sys.exit(1)
+
+    reports = result.get('reports', [])
+    failures = result.get('failures', [])
+
+    print(f"\n--- Results ---")
+    print(f"Reports extracted: {len(reports)}")
+    print(f"Failures: {len(failures)}")
 
     for i, report in enumerate(reports, 1):
         print(f"\n--- Report {i} ---")
         print(f"Title:   {report['title'][:80]}")
-        print(f"Analyst: {report['analyst']}")
+        print(f"Analyst: {report.get('analyst', 'unknown')}")
         print(f"Date:    {report.get('date', 'unknown')}")
         print(f"URL:     {report['url']}")
         if report.get('content'):
             print(f"Content: {report['content'][:200]}...")
+
+    if failures:
+        print(f"\n--- Failures ---")
+        for f in failures:
+            print(f"  - {f}")
+
+    print("\n✓ All tests passed")

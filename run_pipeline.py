@@ -28,6 +28,10 @@ from tier2_synthesizer import synthesize_tier2, Tier2Synthesis
 from implication_router import build_tier3_index, Tier3Index
 from briefing_renderer import render_briefing, get_briefing_stats
 from config import TRUSTED_ANALYSTS
+from scope_filter import (
+    BriefingScope, apply_scope_filter, get_thin_day_label,
+    DEFAULT_TMT_SCOPE, ScopeFilterResult,
+)
 
 # ------------------------------------------------------------------
 # Pipeline Statistics Tracker
@@ -239,44 +243,102 @@ Jefferies LLC is a registered broker-dealer.
 # ------------------------------------------------------------------
 
 def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
-    """Stage 1: Collect reports (try scraping, fallback to sample)."""
+    """Stage 1: Collect reports from portals + podcasts (fallback to sample)."""
     print("\n" + "=" * 60)
-    print("[1/8] COLLECT — Fetching Jefferies Reports")
+    print("[1/8] COLLECT — Fetching Reports from Portals + Podcasts")
     print("=" * 60)
 
     reports = []
     source_failures = []
 
-    # Try live scraping first
+    # 1a: Collect from sell-side portals via registry
     try:
-        from jefferies_scraper import JefferiesScraper
-        scraper = JefferiesScraper(headless=True)
-        analysts = TRUSTED_ANALYSTS.get('jefferies', [])
+        from portal_registry import registry
 
-        print(f"  Attempting to scrape reports from: {', '.join(analysts)}")
-        result = scraper.get_reports_by_analysts(analysts, max_per_analyst=5, days=5)
+        enabled = registry.list_enabled()
+        print(f"  Enabled portals: {', '.join(enabled) if enabled else 'none'}")
 
-        # Handle new dict return format
-        if isinstance(result, dict):
+        if enabled:
+            result = registry.collect_all(days=5, max_per_portal=25, headless=True)
             reports = result.get('reports', [])
-            source_failures = [f"Jefferies/{a}" for a in result.get('failures', [])]
+            source_failures = result.get('failures', [])
+
+            if reports:
+                print(f"  ✓ Collected {len(reports)} reports from {len(enabled)} portal(s)")
+
+            # Check for auth failures specifically and display prominently
+            auth_failures = [f for f in source_failures if 'auth' in f.lower()]
+            other_failures = [f for f in source_failures if 'auth' not in f.lower()]
+
+            if auth_failures:
+                print("\n  " + "!" * 50)
+                print("  AUTHENTICATION REQUIRED:")
+                for f in auth_failures:
+                    print(f"    - {f}")
+                print("  Run the scraper manually to re-authenticate.")
+                print("  " + "!" * 50)
+
+            if other_failures:
+                print(f"  ⚠ Other failures: {len(other_failures)}")
+                for f in other_failures:
+                    print(f"    - {f}")
         else:
-            # Legacy list format
-            reports = result if result else []
+            print("  ⚠ No portals enabled in config")
 
-        if reports:
-            print(f"  ✓ Scraped {len(reports)} reports from Jefferies")
-        if source_failures:
-            print(f"  ⚠ Failed sources: {', '.join(source_failures)}")
     except Exception as e:
-        print(f"  ⚠ Scraping failed: {e}")
-        source_failures.append(f"Jefferies (error: {str(e)[:50]})")
+        print(f"  ⚠ Portal collection failed: {e}")
+        source_failures.append(f"Registry (error: {str(e)[:50]})")
 
-    # Fallback to sample data
+    # 1b: Collect from podcasts via podcast registry
+    try:
+        from podcast_registry import podcast_registry
+
+        enabled_podcasts = podcast_registry.list_enabled()
+        if enabled_podcasts:
+            print(f"\n  Enabled podcasts: {', '.join(enabled_podcasts)}")
+            result = podcast_registry.collect_all(days=7, max_per_podcast=2)
+            episodes = result.get('episodes', [])
+            podcast_failures = result.get('failures', [])
+
+            if episodes:
+                reports.extend(episodes)
+                print(f"  ✓ Collected {len(episodes)} episode(s) from {len(enabled_podcasts)} podcast(s)")
+            if podcast_failures:
+                source_failures.extend(podcast_failures)
+                print(f"  ⚠ Podcast failures: {len(podcast_failures)}")
+        else:
+            print("  Podcasts: disabled in config")
+
+    except ImportError:
+        print("  Podcasts: module not available")
+    except Exception as e:
+        print(f"  ⚠ Podcast collection failed: {e}")
+        source_failures.append(f"Podcasts (error: {str(e)[:50]})")
+
+    # Summary of collection
+    print("\n  --- Collection Summary ---")
+    if reports:
+        # Group by source
+        by_source = {}
+        for r in reports:
+            src = r.get('source', 'Unknown')
+            by_source[src] = by_source.get(src, 0) + 1
+        for src, count in by_source.items():
+            print(f"    {src}: {count} reports")
+    else:
+        print("    No reports collected from any source")
+
+    if source_failures:
+        print(f"    Failed sources: {len(source_failures)}")
+
+    # Fallback to sample data only if NO reports AND user should be warned
     if not reports:
-        print("  → Using sample reports for pipeline demonstration")
+        if source_failures:
+            print("\n  ⚠ ALL DATA SOURCES FAILED - using sample data for demonstration")
+            print("    Fix the above failures to get real data.")
+        else:
+            print("  → Using sample reports for pipeline demonstration")
         reports = SAMPLE_REPORTS
-        source_failures = []  # Clear failures if using sample
 
     stats.log("collect", len(reports), len(reports), f"{len(reports)} reports")
     return reports, source_failures
@@ -417,6 +479,38 @@ def stage_6_claims(chunks: List[Chunk], classifications: List[ChunkClassificatio
     return claims
 
 
+def stage_6b_scope_filter(
+    claims: List[ClaimOutput],
+    stats: PipelineStats,
+    scope: Optional[BriefingScope] = None,
+) -> Tuple[List[ClaimOutput], ScopeFilterResult]:
+    """Stage 6b: Scope Filter — filter claims by sector/analyst/ticker scope."""
+    print("\n" + "=" * 60)
+    print("[6b/8] SCOPE FILTER — Sector-Scoped Briefing")
+    print("=" * 60)
+
+    if scope is None:
+        scope = DEFAULT_TMT_SCOPE  # Include all TMT content (no ticker whitelist)
+
+    print(f"  Scope: {scope.primary_sector}")
+    if scope.ticker_whitelist:
+        print(f"  Ticker whitelist: {len(scope.ticker_whitelist)} tickers")
+    if scope.analyst_whitelist:
+        print(f"  Analyst whitelist: {scope.analyst_whitelist}")
+
+    result = apply_scope_filter(claims, scope)
+
+    print(f"\n  {result.summary()}")
+    if result.is_thin_day:
+        print(f"  ⚠ {get_thin_day_label(result)}")
+
+    stats.log("scope_filter", result.original_count, result.filtered_count,
+              f"scope: {scope.primary_sector}")
+
+    print(f"\n  ✓ Scope filtered: {result.original_count} → {result.filtered_count} claims")
+    return result.claims, result
+
+
 def stage_7_tier_route(claims: List[ClaimOutput], stats: PipelineStats) -> TierAssignment:
     """Stage 7: Tier Routing — rule-based assignment to Tier 1/2/3."""
     print("\n" + "=" * 60)
@@ -434,7 +528,12 @@ def stage_7_tier_route(claims: List[ClaimOutput], stats: PipelineStats) -> TierA
     return assignment
 
 
-def stage_8_synthesize_and_render(assignment: TierAssignment, stats: PipelineStats, source_failures: List[str] = None) -> str:
+def stage_8_synthesize_and_render(
+    assignment: TierAssignment,
+    stats: PipelineStats,
+    source_failures: List[str] = None,
+    scope_result: Optional[ScopeFilterResult] = None,
+) -> str:
     """Stage 8: Synthesis + Briefing Render — final <5 page output."""
     print("\n" + "=" * 60)
     print("[8/8] SYNTHESIS + RENDER — <5 Page Briefing")
@@ -461,6 +560,16 @@ def stage_8_synthesize_and_render(assignment: TierAssignment, stats: PipelineSta
         tier3_index,
         briefing_date=date.today(),
     )
+
+    # Append thin-day notice if applicable
+    if scope_result and scope_result.is_thin_day:
+        thin_day_notice = f"\n\n*{get_thin_day_label(scope_result)}*\n"
+        # Insert at the start of the briefing (after header)
+        lines = briefing.split('\n')
+        insert_idx = next((i for i, line in enumerate(lines) if line.startswith('---')), 5)
+        lines.insert(insert_idx, thin_day_notice)
+        briefing = '\n'.join(lines)
+        print(f"  ⚠ Added thin-day notice: {scope_result.thin_day_reason}")
 
     # Append source failures notice at the bottom
     if source_failures:
@@ -523,11 +632,19 @@ def run_pipeline():
     # Stage 6: Claims
     claims = stage_6_claims(kept_chunks, kept_clfs, kept_docs, stats)
 
+    # Stage 6b: Scope Filter (before tiering)
+    scoped_claims, scope_result = stage_6b_scope_filter(claims, stats)
+
+    if not scoped_claims:
+        print("\n⚠ All claims filtered by scope. Generating thin-day briefing.")
+
     # Stage 7: Tier Routing
-    assignment = stage_7_tier_route(claims, stats)
+    assignment = stage_7_tier_route(scoped_claims, stats)
 
     # Stage 8: Synthesis + Render
-    briefing = stage_8_synthesize_and_render(assignment, stats, source_failures)
+    briefing = stage_8_synthesize_and_render(
+        assignment, stats, source_failures, scope_result=scope_result
+    )
 
     # Print summary
     print(stats.summary())

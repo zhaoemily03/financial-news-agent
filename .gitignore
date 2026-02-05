@@ -11,12 +11,9 @@ venv/
 env/
 ENV/
 
-# Flask
-instance/
-.webassets-cache
-
-# User data
+# User data and runtime
 data/
+logs/
 
 # IDE
 .vscode/
