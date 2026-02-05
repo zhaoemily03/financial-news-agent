@@ -119,8 +119,20 @@ SOURCES = {
     'youtube': {
         'enabled': False,  # Phase 2
     },
-    'twitter': {
-        'enabled': False,  # Phase 2
+    'x_social': {
+        'enabled': False,  # Requires X API Basic tier ($100/mo) for read access
+        'check_frequency_hours': 24,
+        'max_posts_per_day': 12,  # Budget: ~360/month of 500 limit
+        'min_engagement': 100,  # Likes + retweets threshold
+        'days_lookback': 1,
+        'include_replies': False,
+        'hosts': {
+            # All-In Podcast hosts
+            'chamath': {'username': 'chamath', 'display_name': 'Chamath Palihapitiya'},
+            'jason': {'username': 'Jason', 'display_name': 'Jason Calacanis'},
+            'sacks': {'username': 'DavidSacks', 'display_name': 'David Sacks'},
+            'friedberg': {'username': 'friedberg', 'display_name': 'David Friedberg'},
+        },
     },
     'podcasts': {
         'enabled': True,

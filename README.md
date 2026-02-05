@@ -205,6 +205,7 @@ The system uses a **PortalRegistry** to manage multiple sell-side research porta
 | Source | Status | Notes |
 |--------|--------|-------|
 | **Jefferies Research** | ✅ Working | Selenium scraper with SSO cookie auth |
+| **Morgan Stanley Matrix** | ✅ Working | Selenium scraper with email verification auth |
 
 ### Planned Sell-Side Portals
 
@@ -212,7 +213,6 @@ The system uses a **PortalRegistry** to manage multiple sell-side research porta
 |--------|--------|-------|
 | JP Morgan | 🔲 Template ready | Enable in `config.py`, implement `jpmorgan_scraper.py` |
 | Goldman Sachs | 🔲 Template ready | Enable in `config.py`, implement `goldman_scraper.py` |
-| Morgan Stanley | 🔲 Template ready | Enable in `config.py`, implement `morgan_stanley_scraper.py` |
 
 ### Adding a New Portal
 
@@ -251,7 +251,7 @@ The system uses a **PodcastRegistry** to manage multiple podcast sources. Podcas
 | Source | Status | Notes |
 |--------|--------|-------|
 | Substack | 🔲 Placeholder | RSS-based ingestion planned |
-| X (Twitter) | 🔲 Placeholder | API integration planned |
+| X (Twitter) | 🔲 Module ready | Requires X API Basic tier ($100/mo) for read access. Free tier is write-only. |
 
 ---
 
@@ -299,11 +299,11 @@ After logging into Jefferies in your browser, export your session cookies to `da
 ## Usage
 
 ```bash
-# Run the full pipeline
-python daily_briefing.py
+# Run the full pipeline (generates daily briefing)
+python run_pipeline.py
 
-# Run the Flask dashboard
-python app.py
+# Refresh portal cookies (runs automatically via launchd)
+python refresh_cookies.py
 
 # Test individual components
 python claim_extractor.py
@@ -312,18 +312,27 @@ python briefing_renderer.py
 python drilldown.py
 ```
 
+### Automated Scheduling
+
+The system uses **launchd** (macOS) for automation:
+
+- **Cookie refresh**: Runs at login + every 6 hours to keep portal sessions alive
+- **Daily briefing**: Runs at 7 AM or when Mac wakes from sleep
+
+Plist files are installed in `~/Library/LaunchAgents/`.
+
 ---
 
 ## Project Structure
 
 ```
 financial-news-agent/
-├── app.py                   # Flask web dashboard
-├── daily_briefing.py        # Pipeline orchestrator
+├── run_pipeline.py          # End-to-end pipeline orchestrator
+├── refresh_cookies.py       # Automated cookie refresh (launchd)
 │
 ├── # Document Processing
 ├── schemas.py               # Document, Chunk, Claim dataclasses
-├── normalizer.py            # Raw content → Document
+├── jefferies_normalizer.py  # Raw content → Document
 ├── chunker.py               # Document → Chunks (~500 tokens)
 ├── classifier.py            # Chunk classification (LLM)
 │
@@ -342,13 +351,14 @@ financial-news-agent/
 ├── drilldown.py             # Claim traceability and provenance
 │
 ├── # Configuration
-├── config.py                # Tickers, analysts, themes
+├── config.py                # Tickers, analysts, themes, source toggles
 ├── analyst_config_tmt.py    # TMT analyst-specific config
 │
 ├── # Data Ingestion (Multi-Portal Framework)
 ├── base_scraper.py          # Abstract base class for portal scrapers
 ├── portal_registry.py       # Registry for managing multiple portals
-├── jefferies_scraper.py     # Jefferies portal scraper (extends BaseScraper)
+├── jefferies_scraper.py     # Jefferies portal scraper
+├── morgan_stanley_scraper.py # Morgan Stanley Matrix scraper
 ├── cookie_manager.py        # Cookie persistence per portal
 ├── report_tracker.py        # SQLite deduplication
 │
@@ -359,11 +369,14 @@ financial-news-agent/
 ├── rss_podcast.py           # RSS-based podcasts (BG2, Acquired)
 ├── podcast_tracker.py       # SQLite episode deduplication
 │
+├── # Social Media (Future)
+├── x_social.py              # X/Twitter feed handler (requires paid API)
+│
 ├── requirements.txt
 ├── .env                     # API keys (gitignored)
-└── data/                    # Runtime data (gitignored)
-    ├── cookies.json
-    └── processed_content.db
+├── data/                    # Runtime data (gitignored)
+│   └── cookies/             # Portal session cookies
+└── logs/                    # Pipeline logs (gitignored)
 ```
 
 ---
@@ -390,6 +403,7 @@ NFLX, SPOT, U, APP, RBLX, ORCL, PLTR, SHOP
 ## Current Status
 
 - [x] Jefferies portal scraping (Selenium + SSO cookies)
+- [x] Morgan Stanley Matrix scraping (Selenium + email verification)
 - [x] PDF text extraction (pdfplumber + PyPDF2 fallback)
 - [x] Document normalization and chunking
 - [x] LLM classification (topic, ticker, content type)
@@ -402,7 +416,8 @@ NFLX, SPOT, U, APP, RBLX, ORCL, PLTR, SHOP
 - [x] <5 page briefing renderer
 - [x] Drill-down integrity (full claim provenance)
 - [x] Podcast ingestion (All-In, BG2 Pod, Acquired)
-- [ ] End-to-end pipeline integration test
+- [x] Automated cookie refresh (launchd - runs at login + every 6 hours)
+- [x] Daily briefing automation (launchd - 7 AM daily)
+- [ ] X (Twitter) ingestion (module ready, requires paid API tier)
 - [ ] Substack ingestion
 - [ ] Email delivery
-- [ ] Cron job scheduling (7 AM daily)
