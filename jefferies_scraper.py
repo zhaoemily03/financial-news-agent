@@ -115,35 +115,48 @@ class JefferiesScraper(BaseScraper):
         """
         Preflight authentication check.
         Validates access by checking URL and page content.
+        Waits for potential redirects to complete before checking.
 
         Returns:
             True if authenticated, False if reauthentication needed
         """
         try:
             self.driver.get(self.CONTENT_URL)
-            time.sleep(3)
 
+            # Wait longer for redirects to complete (SSO can be slow)
+            # Check URL multiple times to catch delayed redirects
+            login_url_indicators = [
+                'oneclient.jefferies.com',  # SSO redirect
+                'sso', 'saml', 'login', 'signin', 'authenticate',
+                'idp', 'shibboleth'  # Additional SSO indicators
+            ]
+
+            for wait_round in range(3):  # Check 3 times over 6 seconds
+                time.sleep(2)
+                current_url = self.driver.current_url.lower()
+
+                for indicator in login_url_indicators:
+                    if indicator in current_url:
+                        print(f"✗ Authentication check: redirected to login ({indicator} in URL)")
+                        print(f"  Session cookies expired - manual re-authentication required")
+                        return False
+
+            # Final URL check
             current_url = self.driver.current_url.lower()
             page_title = self.driver.title.lower()
 
-            # Check URL for SSO/login redirects (strongest signal)
-            login_url_indicators = [
-                'oneclient.jefferies.com',  # SSO redirect
-                'sso', 'saml', 'login', 'signin', 'authenticate'
-            ]
-            for indicator in login_url_indicators:
-                if indicator in current_url:
-                    print(f"✗ Authentication check: redirected to login ({indicator} in URL)")
-                    print(f"  Session cookies expired - manual re-authentication required")
-                    return False
-
             # Check page title for login indicators
-            if 'sign in' in page_title or 'login' in page_title:
+            if 'sign in' in page_title or 'login' in page_title or 'sso' in page_title:
                 print(f"✗ Authentication check: login page detected (title: {page_title})")
                 print(f"  Session cookies expired - manual re-authentication required")
                 return False
 
-            # Check page content
+            # Must be on content.jefferies.com to be authenticated
+            if 'content.jefferies.com' not in current_url:
+                print(f"✗ Authentication check: not on portal (URL: {current_url[:60]})")
+                return False
+
+            # Check page content for definitive auth indicators
             page_source = self.driver.page_source.lower()
 
             # Signs of being authenticated - look for UI elements only visible when logged in
@@ -156,18 +169,17 @@ class JefferiesScraper(BaseScraper):
                     print("✓ Authentication check: valid session")
                     return True
 
-            # Also check for actual research content
-            if 'research' in page_source and 'content.jefferies.com' in current_url:
+            # Check for actual research content markers
+            research_markers = ['equity research', 'analyst', 'report', 'coverage']
+            found_markers = sum(1 for m in research_markers if m in page_source)
+            if found_markers >= 2:
                 print("✓ Authentication check: research content accessible")
                 return True
 
-            # If we're on content.jefferies.com but no auth indicators, proceed cautiously
-            if 'content.jefferies.com' in current_url:
-                print("⚠ Authentication check: on portal but ambiguous state, proceeding")
-                return True
-
-            # Not on portal and no auth indicators = likely not authenticated
-            print(f"✗ Authentication check: not on portal (URL: {current_url[:60]})")
+            # On portal but no auth indicators = session likely invalid
+            # Don't assume we're authenticated just because URL looks right
+            print(f"✗ Authentication check: on portal but no authenticated content found")
+            print(f"  This usually means cookies are expired - manual re-authentication required")
             return False
 
         except Exception as e:

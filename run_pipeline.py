@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-End-to-End Pipeline Orchestrator
-Runs: normalize → chunk → classify → triage → claim → tier → synthesis → briefing
+End-to-End Pipeline Orchestrator (V3)
+Collect → Normalize → Pre-filter → Chunk → Classify+Filter → Claims+Cap → File → Drift → Synthesize → Render
 
 Usage:
     python run_pipeline.py
@@ -18,20 +18,75 @@ load_dotenv()
 
 # Pipeline imports
 from schemas import Document, Chunk, Claim
-from jefferies_normalizer import JefferiesNormalizer
+from normalizer import DocumentNormalizer
 from chunker import chunk_document, estimate_tokens
-from classifier import classify_chunks, ChunkClassification
-from triage import triage_chunks, TriageResult
-from claim_extractor import extract_claims, ClaimOutput
-from tier_router import assign_tiers, TierAssignment
-from tier2_synthesizer import synthesize_tier2, Tier2Synthesis
-from implication_router import build_tier3_index, Tier3Index
-from briefing_renderer import render_briefing, get_briefing_stats
-from config import TRUSTED_ANALYSTS
-from scope_filter import (
-    BriefingScope, apply_scope_filter, get_thin_day_label,
-    DEFAULT_TMT_SCOPE, ScopeFilterResult,
-)
+from classifier import classify_chunks, filter_irrelevant, ChunkClassification
+from claim_extractor import extract_claims, cap_claims_per_group, ClaimOutput
+from tier2_synthesizer import synthesize_section2, Section2Synthesis
+from briefing_renderer import render_briefing, count_words, count_pages
+from config import TRUSTED_ANALYSTS, ALL_TICKERS, MACRO_NEWS
+
+# Sentiment Drift Detection
+from claim_tracker import ClaimTracker
+from drift_detector import detect_drift, DriftReport
+from config import DRIFT_DETECTION
+
+# Dedup trackers
+from report_tracker import ReportTracker
+from podcast_tracker import PodcastTracker
+
+# ------------------------------------------------------------------
+# Dedup Reset (ensures repeat runs reprocess all today's content)
+# ------------------------------------------------------------------
+
+def _reset_today_dedup():
+    """
+    Clear today's processed entries from report and podcast trackers.
+    Ensures every pipeline run reprocesses all content within
+    the BRIEFING_DAYS window.
+    """
+    today = datetime.now().strftime('%Y-%m-%d')
+    cleared = 0
+
+    # Reset report tracker
+    try:
+        import sqlite3
+        db_path = 'data/processed_content.db'
+        if os.path.exists(db_path):
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM processed_reports WHERE date(processed_date) = ?",
+                (today,)
+            )
+            cleared += cursor.rowcount
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"  ⚠ Could not reset report tracker: {e}")
+
+    # Reset podcast tracker
+    try:
+        import sqlite3
+        db_path = 'data/podcasts.db'
+        if os.path.exists(db_path):
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM processed_episodes WHERE date(processed_date) = ?",
+                (today,)
+            )
+            cleared += cursor.rowcount
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"  ⚠ Could not reset podcast tracker: {e}")
+
+    if cleared:
+        print(f"  ✓ Cleared {cleared} dedup entries from today (will reprocess all content)")
+    else:
+        print(f"  ✓ No prior dedup entries for today")
+
 
 # ------------------------------------------------------------------
 # Pipeline Statistics Tracker
@@ -245,7 +300,7 @@ Jefferies LLC is a registered broker-dealer.
 def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
     """Stage 1: Collect reports from portals + podcasts (fallback to sample)."""
     print("\n" + "=" * 60)
-    print("[1/8] COLLECT — Fetching Reports from Portals + Podcasts")
+    print("[1/7] COLLECT — Fetching Reports from Portals + Podcasts")
     print("=" * 60)
 
     reports = []
@@ -266,7 +321,6 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
             if reports:
                 print(f"  ✓ Collected {len(reports)} reports from {len(enabled)} portal(s)")
 
-            # Check for auth failures specifically and display prominently
             auth_failures = [f for f in source_failures if 'auth' in f.lower()]
             other_failures = [f for f in source_failures if 'auth' not in f.lower()]
 
@@ -315,10 +369,33 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
         print(f"  ⚠ Podcast collection failed: {e}")
         source_failures.append(f"Podcasts (error: {str(e)[:50]})")
 
-    # Summary of collection
+    # 1c: Collect macro news via RSS
+    if MACRO_NEWS.get('enabled', False):
+        try:
+            from macro_news import collect_macro_news
+
+            print(f"\n  Collecting macro news...")
+            macro_reports = collect_macro_news(
+                max_articles=MACRO_NEWS.get('max_articles', 6),
+                days=MACRO_NEWS.get('days_lookback', 1),
+            )
+            if macro_reports:
+                reports.extend(macro_reports)
+                print(f"  ✓ Collected {len(macro_reports)} macro news article(s)")
+            else:
+                print("  ⚠ No macro news articles found")
+
+        except ImportError:
+            print("  Macro news: module not available")
+        except Exception as e:
+            print(f"  ⚠ Macro news collection failed: {e}")
+            source_failures.append(f"Macro news (error: {str(e)[:50]})")
+    else:
+        print("  Macro news: disabled in config")
+
+    # Summary
     print("\n  --- Collection Summary ---")
     if reports:
-        # Group by source
         by_source = {}
         for r in reports:
             src = r.get('source', 'Unknown')
@@ -331,11 +408,10 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
     if source_failures:
         print(f"    Failed sources: {len(source_failures)}")
 
-    # Fallback to sample data only if NO reports AND user should be warned
+    # Fallback to sample data
     if not reports:
         if source_failures:
             print("\n  ⚠ ALL DATA SOURCES FAILED - using sample data for demonstration")
-            print("    Fix the above failures to get real data.")
         else:
             print("  → Using sample reports for pipeline demonstration")
         reports = SAMPLE_REPORTS
@@ -347,17 +423,15 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
 def stage_2_normalize(reports: List[Dict], stats: PipelineStats) -> List[Tuple[Document, List[Chunk]]]:
     """Stage 2: Normalize — raw content to Document + page-level Chunks."""
     print("\n" + "=" * 60)
-    print("[2/8] NORMALIZE — PDF/Text → Documents + Page Chunks")
+    print("[2/7] NORMALIZE — PDF/Text → Documents + Page Chunks")
     print("=" * 60)
 
-    normalizer = JefferiesNormalizer()
+    normalizer = DocumentNormalizer()
     results = []
     total_pages = 0
 
     for i, report in enumerate(reports, 1):
         print(f"  [{i}/{len(reports)}] {report['title'][:50]}...")
-
-        # Use text content (sample data) or would use PDF bytes for real PDFs
         doc, chunks = normalizer.normalize_text(report['content'], report)
         results.append((doc, chunks))
         total_pages += len(chunks)
@@ -368,10 +442,76 @@ def stage_2_normalize(reports: List[Dict], stats: PipelineStats) -> List[Tuple[D
     return results
 
 
+# ------------------------------------------------------------------
+# TMT Pre-filter (deterministic, before LLM classification)
+# ------------------------------------------------------------------
+
+TMT_PREFILTER_KEYWORDS = [
+    'AI', 'artificial intelligence', 'cloud', 'SaaS', 'cybersecurity',
+    'ad revenue', 'advertising', 'streaming', 'semiconductor', 'LLM',
+    'data center', 'machine learning', 'software', 'digital', 'tech',
+    'internet', 'social media', 'e-commerce', 'ecommerce',
+    'gaming', 'fintech', 'payments', 'zero trust', 'endpoint',
+]
+
+PASSTHROUGH_SOURCES = {'podcast', 'macro_news'}
+
+
+def stage_2b_prefilter(
+    normalized: List[Tuple[Document, List[Chunk]]],
+    stats: PipelineStats,
+) -> List[Tuple[Document, List[Chunk]]]:
+    """Stage 2b: Pre-filter — drop non-TMT docs before LLM classification."""
+    print("\n" + "=" * 60)
+    print("[2b] PRE-FILTER — Drop Non-TMT Documents (deterministic)")
+    print("=" * 60)
+
+    kept = []
+    dropped = []
+    ticker_set = {t.upper() for t in ALL_TICKERS}
+
+    for doc, chunks in normalized:
+        source_type = getattr(doc, 'source_type', '') or ''
+        source = getattr(doc, 'source', '') or ''
+        if source_type in PASSTHROUGH_SOURCES or source in PASSTHROUGH_SOURCES:
+            kept.append((doc, chunks))
+            continue
+
+        text_to_scan = doc.title or ''
+        for c in chunks[:2]:
+            text_to_scan += ' ' + (c.text or '')[:500]
+        text_to_scan_upper = text_to_scan.upper()
+        text_to_scan_lower = text_to_scan.lower()
+
+        has_ticker = any(f' {t} ' in f' {text_to_scan_upper} ' or
+                         f'({t})' in text_to_scan_upper or
+                         text_to_scan_upper.startswith(f'{t} ') or
+                         text_to_scan_upper.startswith(f'{t}:')
+                         for t in ticker_set)
+
+        has_tmt_keyword = any(kw.lower() in text_to_scan_lower for kw in TMT_PREFILTER_KEYWORDS)
+
+        if has_ticker or has_tmt_keyword:
+            kept.append((doc, chunks))
+        else:
+            dropped.append(doc.title)
+            print(f"  ✗ Dropped: {doc.title[:60]}")
+
+    stats.log("prefilter", len(normalized), len(kept),
+              f"dropped {len(dropped)} non-TMT docs")
+
+    if dropped:
+        print(f"\n  ✓ Pre-filtered: {len(normalized)} → {len(kept)} documents ({len(dropped)} dropped)")
+    else:
+        print(f"\n  ✓ All {len(kept)} documents pass TMT pre-filter")
+
+    return kept
+
+
 def stage_3_chunk(normalized: List[Tuple[Document, List[Chunk]]], stats: PipelineStats) -> List[Tuple[Document, List[Chunk]]]:
     """Stage 3: Chunk — page-level to atomic chunks (150-400 tokens)."""
     print("\n" + "=" * 60)
-    print("[3/8] CHUNK — Page Chunks → Atomic Chunks (150-400 tok)")
+    print("[3/7] CHUNK — Page Chunks → Atomic Chunks (150-400 tok)")
     print("=" * 60)
 
     results = []
@@ -389,191 +529,163 @@ def stage_3_chunk(normalized: List[Tuple[Document, List[Chunk]]], stats: Pipelin
     return results
 
 
-def stage_4_classify(chunked: List[Tuple[Document, List[Chunk]]], stats: PipelineStats) -> List[Tuple[Document, List[Chunk], List[ChunkClassification]]]:
-    """Stage 4: Classify — tag each chunk with topic, ticker, content type."""
+def stage_4_classify_and_filter(
+    chunked: List[Tuple[Document, List[Chunk]]],
+    stats: PipelineStats,
+) -> List[Tuple[Document, List[Chunk], List[ChunkClassification]]]:
+    """Stage 4: Classify + Filter — LLM tagging then drop irrelevant."""
     print("\n" + "=" * 60)
-    print("[4/8] CLASSIFY — LLM Tagging (topic, ticker, type)")
+    print("[4/7] CLASSIFY + FILTER — LLM Tagging → Drop Irrelevant")
     print("=" * 60)
 
     from openai import OpenAI
     client = OpenAI()
 
     results = []
-    total_chunks = sum(len(chunks) for _, chunks in chunked)
+    total_chunks = 0
+    total_kept = 0
+    total_discarded = 0
 
     for doc, chunks in chunked:
         print(f"  Classifying {len(chunks)} chunks from: {doc.title[:40]}...")
         classifications = classify_chunks(chunks, doc, client)
-        results.append((doc, chunks, classifications))
 
-    stats.log("classify", total_chunks, total_chunks, "LLM classification")
-    print(f"\n  ✓ Classified {total_chunks} chunks")
+        # Filter irrelevant
+        kept_chunks, kept_clfs, discarded = filter_irrelevant(chunks, classifications)
+        total_chunks += len(chunks)
+        total_kept += len(kept_chunks)
+        total_discarded += discarded
+
+        if discarded:
+            print(f"    Filtered: {len(chunks)} → {len(kept_chunks)} ({discarded} irrelevant dropped)")
+
+        if kept_chunks:
+            results.append((doc, kept_chunks, kept_clfs))
+
+    stats.log("classify+filter", total_chunks, total_kept,
+              f"{total_discarded} irrelevant dropped")
+    print(f"\n  ✓ Classified {total_chunks} chunks → {total_kept} relevant ({total_discarded} irrelevant)")
     return results
 
 
-def stage_5_triage(classified: List[Tuple[Document, List[Chunk], List[ChunkClassification]]], stats: PipelineStats) -> Tuple[List[Chunk], List[ChunkClassification], List[Document]]:
-    """Stage 5: Triage — aggressive filtering for <5 page constraint."""
+def stage_5_extract_claims(
+    classified: List[Tuple[Document, List[Chunk], List[ChunkClassification]]],
+    stats: PipelineStats,
+) -> List[ClaimOutput]:
+    """Stage 5: Extract claims + apply per-ticker cap."""
     print("\n" + "=" * 60)
-    print("[5/8] TRIAGE — Aggressive Filtering (relevance, novelty, dedup)")
-    print("=" * 60)
-
-    # Flatten all chunks and classifications
-    all_chunks = []
-    all_classifications = []
-    all_docs = []
-
-    for doc, chunks, clfs in classified:
-        all_chunks.extend(chunks)
-        all_classifications.extend(clfs)
-        all_docs.extend([doc] * len(chunks))
-
-    total_input = len(all_chunks)
-    print(f"  Input: {total_input} chunks")
-
-    # Run triage
-    result = triage_chunks(all_chunks, all_classifications, source='jefferies')
-
-    print(f"\n{result.summary()}")
-
-    # Extract surviving chunks and classifications
-    kept_chunks = [c for c, _, _ in result.kept]
-    kept_clfs = [clf for _, clf, _ in result.kept]
-
-    # Map chunks back to their documents
-    chunk_to_doc = {c.chunk_id: d for c, d in zip(all_chunks, all_docs)}
-    kept_docs = [chunk_to_doc.get(c.chunk_id, all_docs[0]) for c in kept_chunks]
-
-    stats.log("triage", total_input, len(kept_chunks),
-              f"dropped {len(result.dropped)} ({result.drop_rate:.0%})")
-    print(f"\n  ✓ Triaged: {total_input} → {len(kept_chunks)} chunks")
-    return kept_chunks, kept_clfs, kept_docs
-
-
-def stage_6_claims(chunks: List[Chunk], classifications: List[ChunkClassification], docs: List[Document], stats: PipelineStats) -> List[ClaimOutput]:
-    """Stage 6: Claim Extraction — atomic claims with judgment hooks."""
-    print("\n" + "=" * 60)
-    print("[6/8] CLAIMS — Extract Atomic Claims + Judgment Hooks")
+    print("[5/7] CLAIMS — Extract Atomic Claims + Per-Group Cap")
     print("=" * 60)
 
     from openai import OpenAI
     client = OpenAI()
 
-    claims = []
+    all_claims = []
 
-    # Group chunks by doc for proper citation
-    doc_chunks = {}
-    for chunk, clf, doc in zip(chunks, classifications, docs):
-        if doc.doc_id not in doc_chunks:
-            doc_chunks[doc.doc_id] = {"doc": doc, "chunks": [], "clfs": []}
-        doc_chunks[doc.doc_id]["chunks"].append(chunk)
-        doc_chunks[doc.doc_id]["clfs"].append(clf)
+    for doc, chunks, clfs in classified:
+        print(f"  Extracting claims from: {doc.title[:40]}...")
+        doc_claims = extract_claims(chunks, clfs, doc, client)
+        all_claims.extend(doc_claims)
 
-    for doc_id, data in doc_chunks.items():
-        print(f"  Extracting claims from: {data['doc'].title[:40]}...")
-        doc_claims = extract_claims(data["chunks"], data["clfs"], data["doc"], client)
-        claims.extend(doc_claims)
+    # Apply per-ticker/subtopic/macro cap (max 3 per group)
+    capped_claims = cap_claims_per_group(all_claims)
 
-    total_bullets = sum(len(c.bullets) for c in claims)
-    stats.log("claims", len(chunks), len(claims), f"{total_bullets} total bullets")
-    print(f"\n  ✓ Extracted {len(claims)} claims ({total_bullets} bullets)")
-    return claims
+    total_bullets = sum(len(c.bullets) for c in capped_claims)
+    stats.log("claims+cap", sum(len(c) for _, c, _ in classified), len(capped_claims),
+              f"{total_bullets} bullets, {len(all_claims) - len(capped_claims)} capped")
+    print(f"\n  ✓ Extracted {len(all_claims)} claims → {len(capped_claims)} after per-group cap")
+    return capped_claims
 
 
-def stage_6b_scope_filter(
+def stage_5b_file_claims(
     claims: List[ClaimOutput],
     stats: PipelineStats,
-    scope: Optional[BriefingScope] = None,
-) -> Tuple[List[ClaimOutput], ScopeFilterResult]:
-    """Stage 6b: Scope Filter — filter claims by sector/analyst/ticker scope."""
+) -> None:
+    """Stage 5b: File claims in historical tracker for drift detection."""
     print("\n" + "=" * 60)
-    print("[6b/8] SCOPE FILTER — Sector-Scoped Briefing")
+    print("[5b] FILE CLAIMS — Store for Drift Detection")
     print("=" * 60)
 
-    if scope is None:
-        scope = DEFAULT_TMT_SCOPE  # Include all TMT content (no ticker whitelist)
+    tracker = ClaimTracker()
+    stored = tracker.store_claims(claims)
+    tracker_stats = tracker.get_stats()
 
-    print(f"  Scope: {scope.primary_sector}")
-    if scope.ticker_whitelist:
-        print(f"  Ticker whitelist: {len(scope.ticker_whitelist)} tickers")
-    if scope.analyst_whitelist:
-        print(f"  Analyst whitelist: {scope.analyst_whitelist}")
+    print(f"  ✓ Stored {stored} claims")
+    print(f"    Total historical: {tracker_stats['total_claims']} across {tracker_stats['days_tracked']} days")
 
-    result = apply_scope_filter(claims, scope)
-
-    print(f"\n  {result.summary()}")
-    if result.is_thin_day:
-        print(f"  ⚠ {get_thin_day_label(result)}")
-
-    stats.log("scope_filter", result.original_count, result.filtered_count,
-              f"scope: {scope.primary_sector}")
-
-    print(f"\n  ✓ Scope filtered: {result.original_count} → {result.filtered_count} claims")
-    return result.claims, result
+    stats.log("file_claims", len(claims), stored, "SQLite storage")
 
 
-def stage_7_tier_route(claims: List[ClaimOutput], stats: PipelineStats) -> TierAssignment:
-    """Stage 7: Tier Routing — rule-based assignment to Tier 1/2/3."""
+def stage_5c_drift_detection(
+    claims: List[ClaimOutput],
+    stats: PipelineStats,
+) -> Optional[DriftReport]:
+    """Stage 5c: Drift detection — compare today vs history (Phase 2 rendering)."""
     print("\n" + "=" * 60)
-    print("[7/8] TIER ROUTING — Rule-Based (Tier 1/2/3)")
+    print("[5c] DRIFT DETECTION — Belief Changes (rendering deferred to Phase 2)")
     print("=" * 60)
 
-    assignment = assign_tiers(claims)
+    if not DRIFT_DETECTION.get('enabled', False):
+        print("  Drift detection disabled in config")
+        return None
 
-    print(f"  Tier 1 (Attention): {len(assignment.tier_1)} claims")
-    print(f"  Tier 2 (Synthesis): {len(assignment.tier_2)} claims")
-    print(f"  Tier 3 (Reference): {len(assignment.tier_3)} claims")
+    tracker = ClaimTracker()
+    lookback = DRIFT_DETECTION.get('lookback_days', 7)
+    prior_claims = tracker.get_prior_claims(days=lookback)
+    print(f"  Prior claims (last {lookback} days): {len(prior_claims)}")
 
-    stats.log("tier_route", len(claims), len(claims), assignment.summary())
-    print(f"\n  ✓ Routed: {assignment.summary()}")
-    return assignment
+    drift_report = None
+    if prior_claims:
+        print("  Detecting belief drift...")
+        drift_report = detect_drift(claims, tracker, lookback_days=lookback)
+        print(f"    {drift_report.summary()}")
+
+        if drift_report.high_severity:
+            print(f"    High severity signals: {len(drift_report.high_severity)}")
+            for s in drift_report.high_severity[:3]:
+                print(f"      - [{s.drift_type}] {s.description[:70]}")
+    else:
+        print("  No historical data yet — first run builds the baseline")
+
+    signal_count = len(drift_report.signals) if drift_report else 0
+    stats.log("drift", len(claims), signal_count, f"{len(prior_claims)} prior claims")
+
+    return drift_report
 
 
-def stage_8_synthesize_and_render(
-    assignment: TierAssignment,
+def stage_6_synthesize_and_render(
+    claims: List[ClaimOutput],
     stats: PipelineStats,
     source_failures: List[str] = None,
-    scope_result: Optional[ScopeFilterResult] = None,
 ) -> str:
-    """Stage 8: Synthesis + Briefing Render — final <5 page output."""
+    """Stage 6: Synthesize Section 2 + Render 4-section briefing."""
     print("\n" + "=" * 60)
-    print("[8/8] SYNTHESIS + RENDER — <5 Page Briefing")
+    print("[6/7] SYNTHESIZE + RENDER — V3 4-Section Briefing")
     print("=" * 60)
 
-    # Tier 2 Synthesis
-    print("  Synthesizing Tier 2 patterns...")
-    tier2_synthesis = synthesize_tier2(assignment.tier_2)
-    print(f"    Agreements: {len(tier2_synthesis.agreements)}")
-    print(f"    Disagreements: {len(tier2_synthesis.disagreements)}")
-    print(f"    Deltas: {len(tier2_synthesis.deltas)}")
+    # Section 2 synthesis (LLM narrative)
+    print("  Synthesizing Section 2 (agreement/disagreement narrative)...")
+    from openai import OpenAI
+    try:
+        client = OpenAI()
+    except Exception:
+        client = None
 
-    # Tier 3 Index
-    print("  Building Tier 3 index...")
-    tier3_index = build_tier3_index(assignment.tier_3)
-    print(f"    Tickers indexed: {len(tier3_index.by_ticker)}")
-    print(f"    Themes indexed: {len(tier3_index.by_theme)}")
+    section2 = synthesize_section2(claims, client=client)
+    print(f"    Agreements: {len(section2.agreements)}")
+    print(f"    Disagreements: {len(section2.disagreements)}")
+    print(f"    Narrative: {len(section2.narrative)} chars")
 
     # Render briefing
-    print("  Rendering final briefing...")
+    print("  Rendering 4-section briefing...")
     briefing = render_briefing(
-        assignment,
-        tier2_synthesis,
-        tier3_index,
+        claims, section2,
         briefing_date=date.today(),
     )
 
-    # Append thin-day notice if applicable
-    if scope_result and scope_result.is_thin_day:
-        thin_day_notice = f"\n\n*{get_thin_day_label(scope_result)}*\n"
-        # Insert at the start of the briefing (after header)
-        lines = briefing.split('\n')
-        insert_idx = next((i for i, line in enumerate(lines) if line.startswith('---')), 5)
-        lines.insert(insert_idx, thin_day_notice)
-        briefing = '\n'.join(lines)
-        print(f"  ⚠ Added thin-day notice: {scope_result.thin_day_reason}")
-
-    # Append source failures notice at the bottom
+    # Append source failure notice
     if source_failures:
-        failure_notice = "\n---\n\n## ⚠ Data Collection Notices\n\n"
+        failure_notice = "\n---\n\n## Data Collection Notices\n\n"
         failure_notice += "*The following sources could not be retrieved:*\n\n"
         for failure in source_failures:
             failure_notice += f"- {failure}\n"
@@ -581,16 +693,11 @@ def stage_8_synthesize_and_render(
         briefing += failure_notice
         print(f"  ⚠ Added {len(source_failures)} source failure notices")
 
-    # Stats
-    briefing_stats = get_briefing_stats(briefing, assignment, tier3_index)
+    words = count_words(briefing)
+    pages = count_pages(briefing)
+    stats.log("render", len(claims), 1, f"{words} words, {pages:.1f} pages")
 
-    stats.log("render", assignment.total_claims(), 1,
-              f"{briefing_stats.word_count} words, {briefing_stats.page_estimate} pages")
-
-    print(f"\n  ✓ Briefing rendered: {briefing_stats.word_count} words (~{briefing_stats.page_estimate} pages)")
-    if briefing_stats.truncated:
-        print("    ⚠ Some content truncated to meet <5 page constraint")
-
+    print(f"\n  ✓ Briefing rendered: {words} words (~{pages:.1f} pages)")
     return briefing
 
 
@@ -599,12 +706,13 @@ def stage_8_synthesize_and_render(
 # ------------------------------------------------------------------
 
 def run_pipeline():
-    """Execute full end-to-end pipeline."""
+    """Execute full end-to-end V3 pipeline."""
     print("\n" + "=" * 60)
-    print("  FINANCIAL NEWS AGENT — End-to-End Pipeline")
+    print("  FINANCIAL NEWS AGENT — V3 Pipeline")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
+    _reset_today_dedup()
     stats = PipelineStats()
 
     # Stage 1: Collect
@@ -616,35 +724,34 @@ def run_pipeline():
     # Stage 2: Normalize
     normalized = stage_2_normalize(reports, stats)
 
+    # Stage 2b: Pre-filter (drop non-TMT docs before LLM classification)
+    filtered = stage_2b_prefilter(normalized, stats)
+
     # Stage 3: Chunk
-    chunked = stage_3_chunk(normalized, stats)
+    chunked = stage_3_chunk(filtered, stats)
 
-    # Stage 4: Classify
-    classified = stage_4_classify(chunked, stats)
+    # Stage 4: Classify + Filter irrelevant (replaces old classify → scope_chunks → triage)
+    classified = stage_4_classify_and_filter(chunked, stats)
 
-    # Stage 5: Triage
-    kept_chunks, kept_clfs, kept_docs = stage_5_triage(classified, stats)
-
-    if not kept_chunks:
-        print("\n✗ All chunks triaged out. No content for briefing.")
+    if not classified:
+        print("\n✗ All chunks classified as irrelevant. No content for briefing.")
         return None
 
-    # Stage 6: Claims
-    claims = stage_6_claims(kept_chunks, kept_clfs, kept_docs, stats)
+    # Stage 5: Extract claims + per-group cap (max 3 per ticker/subtopic/macro)
+    claims = stage_5_extract_claims(classified, stats)
 
-    # Stage 6b: Scope Filter (before tiering)
-    scoped_claims, scope_result = stage_6b_scope_filter(claims, stats)
+    if not claims:
+        print("\n✗ No claims extracted. No content for briefing.")
+        return None
 
-    if not scoped_claims:
-        print("\n⚠ All claims filtered by scope. Generating thin-day briefing.")
+    # Stage 5b: File claims for historical tracking
+    stage_5b_file_claims(claims, stats)
 
-    # Stage 7: Tier Routing
-    assignment = stage_7_tier_route(scoped_claims, stats)
+    # Stage 5c: Drift detection (runs + files, rendering deferred to Phase 2)
+    drift_report = stage_5c_drift_detection(claims, stats)
 
-    # Stage 8: Synthesis + Render
-    briefing = stage_8_synthesize_and_render(
-        assignment, stats, source_failures, scope_result=scope_result
-    )
+    # Stage 6: Synthesize + Render
+    briefing = stage_6_synthesize_and_render(claims, stats, source_failures)
 
     # Print summary
     print(stats.summary())

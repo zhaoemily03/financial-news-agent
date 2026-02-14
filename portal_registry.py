@@ -16,9 +16,13 @@ Usage:
     result = registry.collect_from(['jefferies', 'jpmorgan'], days=7)
 """
 
+import threading
 from typing import Dict, List, Type, Optional
 from base_scraper import BaseScraper
 import config
+
+# Per-portal timeout (seconds). If a scraper takes longer, it's killed.
+PORTAL_TIMEOUT = 180  # 3 minutes
 
 
 class PortalRegistry:
@@ -72,21 +76,62 @@ class PortalRegistry:
                 enabled.append(portal_name)
         return enabled
 
+    def _collect_single_portal(
+        self,
+        portal_name: str,
+        days: int,
+        max_reports: int,
+        headless: bool,
+        result_out: Dict,
+    ):
+        """Collect from a single portal. Writes to result_out dict (thread-safe)."""
+        try:
+            scraper = self.get_scraper(portal_name, headless=headless)
+            if not scraper:
+                result_out['failures'].append(f"{portal_name} (scraper not found)")
+                return
+
+            result = scraper.get_followed_reports(
+                max_reports=max_reports,
+                days=days
+            )
+
+            if result.get('auth_required'):
+                print(f"[Registry] {portal_name}: Authentication required - skipping")
+                result_out['failures'].append(f"{portal_name} (auth required)")
+                return
+
+            reports = result.get('reports', [])
+            failures = result.get('failures', [])
+
+            result_out['reports'].extend(reports)
+            result_out['failures'].extend([f"{portal_name}: {f}" for f in failures])
+            print(f"[Registry] {portal_name}: Collected {len(reports)} reports")
+
+        except Exception as e:
+            result_out['failures'].append(f"{portal_name} (error: {str(e)[:80]})")
+            print(f"[Registry] {portal_name}: Error - {e}")
+
     def collect_from(
         self,
         portal_names: List[str],
         days: int = 7,
         max_per_portal: int = 20,
-        headless: bool = True
+        headless: bool = True,
+        timeout: int = PORTAL_TIMEOUT,
     ) -> Dict:
         """
         Collect reports from specific portals.
+
+        Each portal runs with a timeout — if it hangs, the pipeline
+        moves on and records the failure instead of crashing.
 
         Args:
             portal_names: List of portal identifiers
             days: Only include reports from last N days
             max_per_portal: Max reports per portal
             headless: Whether to run browsers headless
+            timeout: Per-portal timeout in seconds
 
         Returns:
             Dict with 'reports' (aggregated list), 'failures' (per-source)
@@ -97,48 +142,31 @@ class PortalRegistry:
         for portal_name in portal_names:
             portal_name = portal_name.lower()
 
-            # Check if portal is registered
             if portal_name not in self._scrapers:
                 all_failures.append(f"{portal_name} (not registered)")
                 print(f"[Registry] {portal_name}: Not registered - skipping")
                 continue
 
-            # Get portal config
             portal_config = config.SOURCES.get(portal_name, {})
             max_reports = portal_config.get('max_reports', max_per_portal)
 
-            # Create scraper instance
-            try:
-                scraper = self.get_scraper(portal_name, headless=headless)
-                if not scraper:
-                    all_failures.append(f"{portal_name} (scraper not found)")
-                    continue
+            # Run scraper in a thread with timeout
+            result_out = {'reports': [], 'failures': []}
+            thread = threading.Thread(
+                target=self._collect_single_portal,
+                args=(portal_name, days, max_reports, headless, result_out),
+                daemon=True,
+            )
+            thread.start()
+            thread.join(timeout=timeout)
 
-                # Collect reports
-                result = scraper.get_followed_reports(
-                    max_reports=max_reports,
-                    days=days
-                )
-
-                # Check for auth failure
-                if result.get('auth_required'):
-                    print(f"[Registry] {portal_name}: Authentication required - skipping")
-                    all_failures.append(f"{portal_name} (auth required)")
-                    continue
-
-                # Aggregate reports
-                reports = result.get('reports', [])
-                failures = result.get('failures', [])
-
-                all_reports.extend(reports)
-                all_failures.extend([f"{portal_name}: {f}" for f in failures])
-
-                print(f"[Registry] {portal_name}: Collected {len(reports)} reports")
-
-            except Exception as e:
-                all_failures.append(f"{portal_name} (error: {str(e)[:50]})")
-                print(f"[Registry] {portal_name}: Error - {e}")
-                continue
+            if thread.is_alive():
+                print(f"[Registry] {portal_name}: TIMEOUT after {timeout}s - skipping")
+                all_failures.append(f"{portal_name} (timeout after {timeout}s)")
+                # Thread is daemon, will be cleaned up on process exit
+            else:
+                all_reports.extend(result_out['reports'])
+                all_failures.extend(result_out['failures'])
 
         return {
             'reports': all_reports,

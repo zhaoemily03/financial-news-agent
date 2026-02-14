@@ -3,16 +3,13 @@ Hardcoded AnalystConfig for TMT (Technology, Media, Telecom) analyst.
 Explicit relevance policy — intentionally lossy to enforce <5-page constraint.
 
 This config defines:
-- Topic weights (AI infra > consumer internet)
+- Category weights (tracked_ticker > tmt_sector > macro)
+- TMT subtopic weights (cloud > consumer internet)
 - Source credibility (Jefferies high)
-- Minimum novelty threshold
-- Target daily claim count (20-30)
+- Ticker priority (primary > watchlist)
 
 Usage:
-    from analyst_config_tmt import TMT_CONFIG, score_chunk, filter_chunks
-
-    scored = [(chunk, score_chunk(chunk, clf)) for chunk, clf in zip(chunks, classifications)]
-    filtered = filter_chunks(chunks, classifications)
+    from analyst_config_tmt import TMT_CONFIG, score_chunk, SOURCE_CREDIBILITY
 """
 
 from typing import List, Tuple, Optional
@@ -21,45 +18,38 @@ from schemas import Chunk, AnalystConfig
 from classifier import ChunkClassification
 
 # ------------------------------------------------------------------
-# Topic Weights — higher = more relevant to TMT analyst
+# Category Weights — higher = more relevant to briefing
+# ------------------------------------------------------------------
+
+CATEGORY_WEIGHTS = {
+    'tracked_ticker': 1.0,     # Direct coverage — always highest priority
+    'tmt_sector': 0.7,         # Sector-level context
+    'macro': 0.5,              # Macro — important but lower priority for TMT analyst
+    'irrelevant': 0.0,         # Should already be filtered out
+}
+
+# ------------------------------------------------------------------
+# TMT Subtopic Weights — higher = more relevant to TMT analyst
 # ------------------------------------------------------------------
 # Scale: 0.0 (ignore) to 1.0 (critical)
-# AI/infra prioritized over consumer internet per spec
 
-TOPIC_WEIGHTS = {
-    # Technology — highest priority
-    'ai_ml': 1.0,              # AI infrastructure, LLMs, ML
-    'cloud': 0.9,              # Cloud computing, IaaS, PaaS
-    'infrastructure': 0.85,    # Data centers, servers
-    'semiconductors': 0.8,     # Chips, GPUs (AI enablers)
-    'software': 0.75,          # Enterprise software, SaaS
-    'cybersecurity': 0.7,      # Security (adjacent to infra)
-
-    # Media — moderate priority
-    'advertising': 0.6,        # Digital ads (META, GOOGL revenue)
-    'social': 0.55,            # Social networks
-    'content': 0.5,            # Streaming, video
-    'gaming': 0.45,            # Games, virtual worlds
-
-    # Telecom — lower priority for TMT software focus
-    'networks': 0.4,           # 5G, wireless
-    'telecom_infra': 0.35,     # Towers, fiber
-
-    # Other
-    'ecommerce': 0.5,          # Online retail (AMZN, BABA)
-    'fintech': 0.4,            # Payments
-    'hardware': 0.45,          # Consumer devices
-    'general': 0.3,            # Catch-all, low priority
+SUBTOPIC_WEIGHTS = {
+    'cloud_enterprise_software': 1.0,       # Cloud, SaaS, enterprise apps
+    'internet_digital_advertising': 0.85,   # Digital ads, ad tech, social
+    'semiconductors_hardware': 0.8,         # Chips, GPUs, data centers
+    'consumer_internet_media': 0.7,         # Streaming, gaming, e-commerce
+    'telecom_infrastructure': 0.5,          # 5G, wireless, towers
 }
 
 # ------------------------------------------------------------------
 # Source Credibility — trust scores by source
 # ------------------------------------------------------------------
 # Scale: 0.0 (untrusted) to 1.0 (highly trusted)
+# Used by tier2_synthesizer.py for Section 2 narrative
 
 SOURCE_CREDIBILITY = {
     'jefferies': 1.0,          # Primary trusted source
-    'jpmorgan': 0.9,           # Tier 1 bank (when enabled)
+    'jpmorgan': 0.9,
     'morgan_stanley': 0.9,
     'goldman': 0.9,
     'bofa': 0.85,
@@ -67,6 +57,7 @@ SOURCE_CREDIBILITY = {
     'ubs': 0.8,
     'barclays': 0.8,
     'substack': 0.6,           # Independent, variable quality
+    'podcast': 0.5,            # Podcast hosts
     'x': 0.4,                  # Social media, low signal
     'unknown': 0.3,
 }
@@ -83,27 +74,14 @@ CONTENT_TYPE_WEIGHTS = {
 }
 
 # ------------------------------------------------------------------
-# Novelty Thresholds
-# ------------------------------------------------------------------
-# Filter out stale/rehashed content
-
-NOVELTY_WEIGHTS = {
-    'new': 1.0,                # Fresh information
-    'incremental': 0.6,        # Updates to known info
-    'rehash': 0.2,             # Already known, low value
-}
-
-MINIMUM_NOVELTY_THRESHOLD = 0.3  # Effectively filters out 'rehash'
-
-# ------------------------------------------------------------------
 # Polarity Weights — slight bias toward actionable signals
 # ------------------------------------------------------------------
 
 POLARITY_WEIGHTS = {
-    'positive': 1.0,           # Bullish signals
-    'negative': 1.0,           # Risk signals (equally important)
-    'mixed': 0.8,              # Nuanced, still valuable
-    'neutral': 0.6,            # Less actionable
+    'positive': 1.0,
+    'negative': 1.0,           # Risk signals equally important
+    'mixed': 0.8,
+    'neutral': 0.6,
 }
 
 # ------------------------------------------------------------------
@@ -117,17 +95,16 @@ PRIMARY_TICKERS = {
 
 WATCHLIST_TICKERS = {
     'NFLX', 'SPOT', 'U', 'APP', 'RBLX',  # Internet watchlist
-    'NET', 'ORCL', 'PLTR', 'SHOP',  # Software watchlist (NET in both primary and watchlist per config.py)
+    'NET', 'ORCL', 'PLTR', 'SHOP',  # Software watchlist
 }
+
 
 def get_ticker_weight(tickers: List[str]) -> float:
     """Return highest priority weight for a list of tickers."""
     if not tickers:
-        return 0.5  # No ticker = generic content
-
+        return 0.5  # No ticker = sector/macro content
     has_primary = any(t in PRIMARY_TICKERS for t in tickers)
     has_watchlist = any(t in WATCHLIST_TICKERS for t in tickers)
-
     if has_primary:
         return 1.0
     elif has_watchlist:
@@ -135,16 +112,11 @@ def get_ticker_weight(tickers: List[str]) -> float:
     else:
         return 0.4  # Off-coverage ticker
 
+
 # ------------------------------------------------------------------
-# Daily Output Constraints
+# Relevance score threshold
 # ------------------------------------------------------------------
 
-TARGET_CLAIM_COUNT = 25        # Target 20-30 claims per day
-MIN_CLAIM_COUNT = 20
-MAX_CLAIM_COUNT = 30
-
-# Relevance score threshold — chunks below this are dropped
-# Matches config.py RELEVANCE_THRESHOLD
 RELEVANCE_THRESHOLD = 0.7
 
 # ------------------------------------------------------------------
@@ -159,39 +131,39 @@ def score_chunk(
     """
     Compute relevance score for a classified chunk.
 
-    Score = topic_weight × content_weight × novelty_weight × polarity_weight
-            × ticker_weight × source_credibility
+    Score = category_weight × subtopic_weight × content_weight
+            × polarity_weight × ticker_weight × source_credibility
 
     Returns: float 0.0–1.0
     """
-    # Topic score (use primary, boost if secondary also relevant)
-    topic_score = TOPIC_WEIGHTS.get(classification.topic, 0.3)
-    if classification.topic_secondary:
-        secondary = TOPIC_WEIGHTS.get(classification.topic_secondary, 0.3)
-        topic_score = min(1.0, topic_score + secondary * 0.2)
+    # Category score
+    category_score = CATEGORY_WEIGHTS.get(classification.category, 0.0)
+    if category_score == 0.0:
+        return 0.0  # Irrelevant — hard filter
+
+    # Subtopic score (only for tmt_sector; others get 0.8 baseline)
+    if classification.category == 'tmt_sector' and classification.tmt_subtopic:
+        subtopic_score = SUBTOPIC_WEIGHTS.get(classification.tmt_subtopic, 0.5)
+    else:
+        subtopic_score = 0.8  # Baseline for non-sector content
 
     # Content type
     content_score = CONTENT_TYPE_WEIGHTS.get(classification.content_type, 0.7)
-
-    # Novelty (hard filter + weight)
-    novelty_score = NOVELTY_WEIGHTS.get(classification.novelty, 0.5)
-    if novelty_score < MINIMUM_NOVELTY_THRESHOLD:
-        return 0.0  # Hard filter for rehash
 
     # Polarity
     polarity_score = POLARITY_WEIGHTS.get(classification.polarity, 0.6)
 
     # Ticker relevance
-    ticker_score = get_ticker_weight(classification.asset_exposure)
+    ticker_score = get_ticker_weight(classification.tickers)
 
     # Source credibility
     source_score = SOURCE_CREDIBILITY.get(source.lower(), 0.3)
 
-    # Weighted product (geometric mean-ish)
+    # Weighted sum
     raw_score = (
-        topic_score * 0.30 +
+        category_score * 0.30 +
+        subtopic_score * 0.20 +
         content_score * 0.15 +
-        novelty_score * 0.20 +
         polarity_score * 0.10 +
         ticker_score * 0.15 +
         source_score * 0.10
@@ -209,29 +181,19 @@ def filter_chunks(
     """
     Filter and rank chunks by relevance score.
 
-    Args:
-        chunks: List of Chunk objects
-        classifications: Corresponding ChunkClassification objects
-        source: Source name for credibility lookup
-        max_chunks: Optional limit (defaults to MAX_CLAIM_COUNT)
-
     Returns:
         List of (chunk, classification, score) tuples, sorted by score desc
     """
     if max_chunks is None:
-        max_chunks = MAX_CLAIM_COUNT
+        max_chunks = 50  # generous limit; per-ticker cap handles brevity
 
-    # Score all chunks
     scored = []
     for chunk, clf in zip(chunks, classifications):
         score = score_chunk(chunk, clf, source)
         if score >= RELEVANCE_THRESHOLD:
             scored.append((chunk, clf, score))
 
-    # Sort by score descending
     scored.sort(key=lambda x: x[2], reverse=True)
-
-    # Enforce max limit (lossy by design)
     return scored[:max_chunks]
 
 
@@ -274,111 +236,89 @@ TMT_CONFIG = AnalystConfig(
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from classifier import ChunkClassification
-
     print("=" * 60)
     print("TMT AnalystConfig — Relevance Policy Test")
     print("=" * 60)
 
-    # Sample classifications to test scoring
     test_cases = [
-        # High relevance: AI topic, new info, primary ticker
+        # High relevance: tracked ticker, primary coverage
         ChunkClassification(
             chunk_id="1",
-            topic="ai_ml",
-            asset_exposure=["META"],
+            category="tracked_ticker",
+            tickers=["META"],
             content_type="forecast",
             polarity="positive",
-            novelty="new",
         ),
-        # Medium relevance: advertising, incremental
+        # Medium relevance: TMT sector, cloud subtopic
         ChunkClassification(
             chunk_id="2",
-            topic="advertising",
-            asset_exposure=["GOOGL"],
+            category="tmt_sector",
+            tmt_subtopic="cloud_enterprise_software",
             content_type="fact",
             polarity="neutral",
-            novelty="incremental",
         ),
-        # Low relevance: general topic, rehash
+        # Lower relevance: macro
         ChunkClassification(
             chunk_id="3",
-            topic="general",
-            asset_exposure=[],
-            content_type="interpretation",
+            category="macro",
+            tickers=[],
+            content_type="fact",
             polarity="neutral",
-            novelty="rehash",
         ),
-        # Risk signal: cybersecurity, negative
+        # Irrelevant — should score 0
         ChunkClassification(
             chunk_id="4",
-            topic="cybersecurity",
-            asset_exposure=["CRWD"],
-            content_type="risk",
-            polarity="negative",
-            novelty="new",
+            category="irrelevant",
+            tickers=[],
+            content_type="interpretation",
+            polarity="neutral",
         ),
-        # Off-coverage ticker
+        # Tracked ticker, watchlist
         ChunkClassification(
             chunk_id="5",
-            topic="fintech",
-            asset_exposure=["SQ"],
-            content_type="fact",
-            polarity="positive",
-            novelty="new",
+            category="tracked_ticker",
+            tickers=["NFLX"],
+            content_type="risk",
+            polarity="negative",
         ),
     ]
 
-    # Create dummy chunks for testing
     dummy_chunks = [
         Chunk(chunk_id=clf.chunk_id, doc_id="test", text=f"Test chunk {clf.chunk_id}")
         for clf in test_cases
     ]
 
-    print("\nScoring individual classifications:\n")
-    print(f"{'ID':<4} {'Topic':<15} {'Ticker':<8} {'Type':<12} {'Novelty':<10} {'Score':<6}")
+    print(f"\n{'ID':<4} {'Category':<16} {'Ticker':<8} {'Type':<14} {'Score':<6}")
     print("-" * 60)
 
     for clf in test_cases:
         score = score_chunk(Chunk(chunk_id=clf.chunk_id), clf, 'jefferies')
-        ticker = clf.asset_exposure[0] if clf.asset_exposure else "—"
-        print(f"{clf.chunk_id:<4} {clf.topic:<15} {ticker:<8} {clf.content_type:<12} {clf.novelty:<10} {score:<6}")
+        ticker = clf.tickers[0] if clf.tickers else "—"
+        print(f"{clf.chunk_id:<4} {clf.category:<16} {ticker:<8} {clf.content_type:<14} {score:<6}")
 
-    print("\n" + "=" * 60)
-    print("Filter Test (threshold={}, max={})".format(RELEVANCE_THRESHOLD, MAX_CLAIM_COUNT))
-    print("=" * 60)
-
-    filtered = filter_chunks(dummy_chunks, test_cases)
-    print(f"\nInput: {len(test_cases)} chunks → Output: {len(filtered)} chunks")
-    print("\nPassed filter:")
-    for chunk, clf, score in filtered:
-        print(f"  [{clf.chunk_id}] {clf.topic:<15} score={score}")
-
-    # Verify lossy behavior
     print("\n" + "=" * 60)
     print("Verification")
     print("=" * 60)
 
-    # Rehash should be filtered out
-    rehash_scores = [score_chunk(Chunk(chunk_id="x"), clf) for clf in test_cases if clf.novelty == 'rehash']
-    assert all(s == 0.0 for s in rehash_scores), "Rehash should score 0"
-    print("✓ Rehash content filtered (score=0)")
+    # Irrelevant should score 0
+    irr_score = score_chunk(Chunk(chunk_id="x"), test_cases[3])
+    assert irr_score == 0.0, f"Irrelevant should score 0, got {irr_score}"
+    print("✓ Irrelevant content filtered (score=0)")
 
-    # AI/ML should score higher than general
-    ai_score = score_chunk(Chunk(chunk_id="x"), test_cases[0])
-    ad_score = score_chunk(Chunk(chunk_id="x"), test_cases[1])
-    assert ai_score > ad_score, "AI should score higher than advertising"
-    print("✓ AI infra > consumer internet (topic weights)")
+    # Tracked ticker should score higher than macro
+    ticker_score = score_chunk(Chunk(chunk_id="x"), test_cases[0])
+    macro_score = score_chunk(Chunk(chunk_id="x"), test_cases[2])
+    assert ticker_score > macro_score, "Tracked ticker should score higher than macro"
+    print("✓ tracked_ticker > macro (category weights)")
 
-    # Primary tickers should score higher than off-coverage
+    # Primary tickers should score higher than watchlist
     primary_score = score_chunk(Chunk(chunk_id="x"), test_cases[0])
-    off_coverage_score = score_chunk(Chunk(chunk_id="x"), test_cases[4])
-    assert primary_score > off_coverage_score, "Primary ticker should score higher"
-    print("✓ Primary tickers prioritized over off-coverage")
+    watchlist_score = score_chunk(Chunk(chunk_id="x"), test_cases[4])
+    assert primary_score > watchlist_score, "Primary ticker should score higher"
+    print("✓ Primary tickers prioritized over watchlist")
 
-    # Filter enforces max limit
-    assert len(filtered) <= MAX_CLAIM_COUNT
-    print(f"✓ Output capped at {MAX_CLAIM_COUNT} claims (lossy by design)")
+    # Source credibility check
+    assert SOURCE_CREDIBILITY['jefferies'] > SOURCE_CREDIBILITY['x']
+    print("✓ Source credibility: sell-side > social media")
 
-    print(f"\nTarget daily claim count: {MIN_CLAIM_COUNT}–{MAX_CLAIM_COUNT}")
-    print("Config ready for <5-page briefing constraint.")
+    print("\nConfig ready for V3 briefing pipeline.")

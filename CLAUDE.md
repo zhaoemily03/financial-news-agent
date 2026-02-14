@@ -4,6 +4,18 @@ Instructions for Claude when working on this codebase.
 
 ---
 
+## What This System Does
+
+Surfaces **belief change and sentiment drift** — the inputs that drive fundamental buy decisions — while keeping breaking news visible. This is NOT a summarization tool.
+
+The system helps analysts:
+- Track belief evolution across sources over time
+- Get early warning of softening conviction
+- See disagreement clearly
+- Spend less time reading
+
+---
+
 ## Target User
 
 **Professional TMT analyst** (internet + software focus)
@@ -11,6 +23,15 @@ Instructions for Claude when working on this codebase.
 - Wants to **challenge ideas**, not read summaries
 - Forms their own conviction; does not want AI opinions
 - Covers: META, GOOGL, AMZN, AAPL, MSFT, CRWD, ZS, PANW, NET, DDOG, SNOW, MDB
+
+---
+
+## Core Design Principles (Non-Negotiable)
+
+1. **Change > State** — Surface what *changed*, not what *is*
+2. **Beliefs > Documents** — Track claims and confidence over time
+3. **Judgment Lives With Humans** — AI surfaces pressure on beliefs, not conclusions
+4. **Brevity Enables Thinking** — <5 pages, <15 minutes
 
 ---
 
@@ -65,6 +86,8 @@ Any design choice that increases verbosity or hides uncertainty should be avoide
 | Words like "bullish", "bearish", "should", "recommend" | Thesis language is banned |
 | Global importance rankings | Only local prioritization within tiers |
 | Hidden disagreement | Contradictions are first-class outputs |
+| Static descriptions that don't show change | Change > State |
+| Background explanations or repeated company descriptions | Wastes page budget |
 
 ### Claude Should Favor:
 
@@ -76,6 +99,8 @@ Any design choice that increases verbosity or hides uncertainty should be avoide
 | Rule-based routing over LLM judgment | "Why is this here?" must have a clear answer |
 | Atomic, challengeable claims | Easy to agree, disagree, or ignore |
 | Source citations on every claim | Traceability to PDF page |
+| Change-over-time signals | Drift detection is the core value |
+| Belief pressure metadata | Enables cross-time comparison |
 
 ### Where AI Is Allowed
 
@@ -91,9 +116,9 @@ All other modules must be deterministic.
 
 ## Architecture Overview
 
-**Pipeline:** Collect → Normalize → Chunk → Classify → Triage → Claims → Scope Filter → Route → Synthesize → Render → Drill-down
+**Pipeline (V3):** Collect → Normalize → Pre-filter → Chunk → Classify+Filter → Claims+Cap → File Claims → Drift → Synthesize → Render
 
-See README.md for the full 11-step pipeline with AI/non-AI markers.
+See README.md for the full pipeline with AI/non-AI markers.
 
 ### Key Modules
 
@@ -101,16 +126,47 @@ See README.md for the full 11-step pipeline with AI/non-AI markers.
 |--------|---------|----------|
 | `schemas.py` | Document, Chunk, Claim dataclasses | No |
 | `normalizer.py` | Raw content → Document | No |
+| `macro_news.py` | RSS macro news collection (Reuters, CNBC) | No |
 | `chunker.py` | Document → Chunks (~500 tokens) | No |
-| `classifier.py` | Chunk classification | **Yes** |
-| `triage.py` | Analyst-configurable filtering | No |
-| `claim_extractor.py` | Chunk → atomic claims | **Yes** |
+| `classifier.py` | 4-category chunk classification + `filter_irrelevant()` | **Yes** |
+| `claim_extractor.py` | Chunk → atomic claims + `cap_claims_per_group()` | **Yes** |
+| `claim_tracker.py` | Historical claim storage (SQLite) | No |
+| `drift_detector.py` | Cross-time belief shift detection | No |
+| `tier2_synthesizer.py` | Section 2 narrative synthesis (agreement/disagreement) | **Yes** |
+| `briefing_renderer.py` | V3 4-section <5 page output | No |
+| `analyst_config_tmt.py` | Category/subtopic weights, source credibility | No |
 | `scope_filter.py` | Sector/ticker/analyst scoping | No |
-| `tier_router.py` | Rule-based Tier 1/2/3 | No |
-| `tier2_synthesizer.py` | Cross-claim synthesis | **Yes** |
-| `implication_router.py` | Tier 3 indexing | No |
-| `briefing_renderer.py` | <5 page output | No |
 | `drilldown.py` | Claim provenance | No |
+
+### Deprecated Modules (kept on disk, removed from pipeline)
+
+| Module | Replaced By |
+|--------|-------------|
+| `tier_router.py` | Classifier `category` field routes directly |
+| `implication_router.py` | No Tier 3 section in V3 |
+| `triage.py` | `filter_irrelevant()` + per-ticker claim cap |
+
+### Drift Detection (Deterministic, No AI)
+
+The `drift_detector.py` module compares today's claims against historical claims stored in `claim_tracker.py`. It detects:
+- **Confidence shifts** — Source was high-conviction, now hedging
+- **Belief flips** — Source confirmed consensus, now contradicts
+- **New disagreement** — Sources that were aligned are now split
+- **Resurgence** — Topic reappearing after silence
+- **Attention decay** — Topic that was active has gone quiet
+
+This is deterministic — no LLM calls. It compares `confidence_level` and `belief_pressure` metadata across time.
+
+### Briefing Output (V3, 4 Sections)
+
+| # | Section | Content | Status |
+|---|---------|---------|--------|
+| 1 | Objective Breaking News | Per-ticker updates (max 3 each, "No Update" if nothing) + TMT sector-level | **Live** |
+| 2 | Synthesis Across Sources | LLM narrative: where sources agree/disagree, considering credibility | **Live** |
+| 3 | Macro Connections | Macro claims + TMT linkage | **Phase 2 stub** |
+| 4 | Longitudinal Delta Detection | Drift signals, belief shifts over time | **Phase 2 stub** |
+
+Section 1 routes claims by `category`: `tracked_ticker` → per-ticker groups, `tmt_sector` → sector sub-section. Section 2 uses `tier2_synthesizer.py` with source credibility from `analyst_config_tmt.SOURCE_CREDIBILITY`. Per-ticker claim cap (max 3) is enforced by `cap_claims_per_group()` in `claim_extractor.py`.
 
 ### Data Ingestion (Multi-Portal Framework)
 
@@ -146,34 +202,22 @@ See README.md for the full 11-step pipeline with AI/non-AI markers.
 
 ### Key Config Values
 
-- **RELEVANCE_THRESHOLD**: 0.7 (chunks below this are triaged out)
 - **BRIEFING_DAYS**: 5 (only process reports from last 5 days)
+- **MAX_CLAIMS_PER_GROUP**: 3 (per ticker/subtopic/macro group)
 - **Primary tickers**: META, GOOGL, AMZN, AAPL, BABA, 700.HK, MSFT, CRWD, ZS, PANW, NET, DDOG, SNOW, MDB
 - **Trusted analysts**: Brent Thill, Joseph Gallo (Jefferies)
+- **Categories**: tracked_ticker, tmt_sector, macro, irrelevant
 
 ---
 
 ## Scope Filtering
 
-The `scope_filter.py` module ensures briefings stay within the analyst's sector focus. Applied **after claim extraction, before tier routing**.
+Scope filtering happens at **two levels** in the V3 pipeline:
 
-### Purpose
+1. **Stage 2b — Document pre-filter** (deterministic): Drops entire documents with no TMT relevance before classification. Checks title + first chunks for covered tickers or TMT keywords. Podcasts and macro news always pass.
+2. **Stage 4 — Classify + Filter** (LLM + deterministic): Classifier assigns 4 categories. `filter_irrelevant()` drops `irrelevant` chunks before claim extraction. Per-ticker claim cap (max 3) enforces brevity.
 
-Prevents non-TMT content from diluting TMT briefings. A utilities analyst's report scraped from the same portal won't pollute the internet/software briefing.
-
-### Configuration
-
-| Field | Effect |
-|-------|--------|
-| `primary_sector` | 'TMT' (default) or 'ALL' to skip filtering |
-| `sub_sectors` | Limit to specific sub-sectors: technology, media, telecom |
-| `ticker_whitelist` | Only include claims for listed tickers |
-| `analyst_whitelist` | Only include claims from listed analysts |
-
-### Built-in Scopes
-
-- `DEFAULT_TMT_SCOPE` — All TMT content, no restrictions
-- `INTERNET_SOFTWARE_SCOPE` — Technology + media, primary coverage tickers only
+Old stages removed: chunk-level scope (4b), triage (5), claim-level scope (6b). The classifier `irrelevant` category replaces all three.
 
 ### Thin Day Handling
 
@@ -259,20 +303,21 @@ The system uses a `PodcastRegistry` to manage multiple podcast sources. Podcasts
 
 ## Current Status
 
+- [x] V3 4-section briefing pipeline (Sections 1+2 live, 3+4 stubbed)
+- [x] 4-category classifier (tracked_ticker, tmt_sector, macro, irrelevant)
+- [x] Per-ticker claim cap (max 3 most important per group)
+- [x] Section 2 LLM narrative synthesis with source credibility
 - [x] Jefferies portal scraping (Selenium + SSO cookies)
 - [x] PDF text extraction (pdfplumber + PyPDF2 fallback)
 - [x] Document normalization and chunking
-- [x] LLM classification (topic, ticker, content type)
-- [x] Analyst-configurable triage with deduplication
-- [x] Claim extraction with judgment hooks
-- [x] Sector-scoped claim filtering (ticker/analyst whitelists)
-- [x] Rule-based tier routing (Tier 1/2/3)
-- [x] Tier 2 synthesis (agreement/disagreement/deltas)
-- [x] Tier 3 implication indexing
-- [x] <5 page briefing renderer
-- [x] Drill-down integrity (full claim provenance)
 - [x] Podcast ingestion (All-In, BG2 Pod, Acquired)
+- [x] Historical claim tracking (SQLite-backed)
+- [x] Sentiment drift detection (confidence shifts, belief flips, disagreement)
+- [x] Automated cookie refresh (launchd)
+- [x] Macro news collection (Reuters, CNBC via RSS)
+- [x] Document-level pre-filter (save LLM calls on non-TMT docs)
+- [ ] Section 3: Macro Connections (Phase 2)
+- [ ] Section 4: Longitudinal Delta Detection rendering (Phase 2)
 - [ ] End-to-end pipeline integration test
 - [ ] Substack ingestion
 - [ ] Email delivery
-- [ ] Cron job scheduling (7 AM daily)

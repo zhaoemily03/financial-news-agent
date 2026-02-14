@@ -180,8 +180,9 @@ podcast_registry = PodcastRegistry()
 def _auto_register():
     """Auto-register podcasts that are available."""
     try:
-        from youtube_podcast import AllInPodcast
+        from youtube_podcast import AllInPodcast, A16ZPodcast
         podcast_registry.register('all-in', AllInPodcast)
+        podcast_registry.register('a16z', A16ZPodcast)
     except ImportError:
         pass
 

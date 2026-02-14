@@ -45,6 +45,7 @@ BELIEF_PRESSURES = [
     'contradicts_prior_assumptions',
     'unclear',
 ]
+EVENT_TYPES = ['earnings', 'guidance', 'product', 'regulation', 'org', 'market', 'macro']
 
 # ------------------------------------------------------------------
 # Claim Output Schema
@@ -71,6 +72,16 @@ class ClaimOutput:
 
     # Uncertainty tracking
     uncertainty_preserved: bool       # True if "may", "could", etc. kept
+
+    # Classification category (from classifier.py)
+    category: Optional[str] = None          # tracked_ticker | tmt_sector | macro
+
+    # MECE section routing fields
+    event_type: Optional[str] = None        # earnings/guidance/product/regulation/org/market/macro
+    is_descriptive_event: bool = False       # True = objective fact about what occurred
+    has_belief_delta: bool = False           # True = changes/pressures prior expectations
+    sector_implication: Optional[str] = None # For macro claims: one-sentence TMT linkage
+    section_id: Optional[int] = None        # assigned during briefing routing
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -129,7 +140,11 @@ Output format (JSON):
   "has_uncertainty": true/false,
   "confidence_level": "low" | "medium" | "high",
   "time_sensitivity": "breaking" | "upcoming" | "ongoing",
-  "belief_pressure": "confirms_consensus" | "contradicts_consensus" | "contradicts_prior_assumptions" | "unclear"
+  "belief_pressure": "confirms_consensus" | "contradicts_consensus" | "contradicts_prior_assumptions" | "unclear",
+  "event_type": "earnings" | "guidance" | "product" | "regulation" | "org" | "market" | "macro" | null,
+  "is_descriptive_event": true | false,
+  "has_belief_delta": true | false,
+  "sector_implication": "One sentence TMT linkage" | null
 }
 
 FIELD DEFINITIONS:
@@ -157,6 +172,29 @@ FIELD DEFINITIONS:
    - "contradicts_prior_assumptions": Challenges the reader's likely mental model
    - "unclear": Not enough context to determine
 
+5. event_type (what category of event is this)
+   - "earnings": Earnings results, revenue/EPS beats or misses, quarterly reports
+   - "guidance": Management guidance, outlook changes, forward estimates
+   - "product": Product launches, feature announcements, user milestones
+   - "regulation": Regulatory actions, legal rulings, compliance changes
+   - "org": Organizational changes, hiring, layoffs, M&A, leadership
+   - "market": Market data, pricing, index moves, competitive dynamics
+   - "macro": Macroeconomic events — GDP, interest rates, inflation, tariffs, fiscal policy
+   - null: Not an identifiable event (analysis, commentary, background)
+
+6. is_descriptive_event (did something concrete HAPPEN)
+   - true: A concrete event, action, or announcement occurred
+   - false: Analysis, interpretation, ongoing background, or thesis
+
+7. has_belief_delta (does this change prior expectations)
+   - true: This contradicts, revises, or materially updates what was previously expected
+   - false: This confirms or is consistent with prior expectations
+
+8. sector_implication (macro claims ONLY)
+   - For macro/regulatory events: one sentence on how this connects to or influences the TMT sector
+   - For company-specific claims: null
+   - Example: "Higher rates extend pressure on unprofitable software multiples"
+
 RULES:
 - Do NOT rank importance (that's the reader's job)
 - Do NOT summarize across multiple sources
@@ -182,9 +220,11 @@ def _build_user_prompt(
 
     # Classification context
     parts.append(f"Content type: {classification.content_type}")
-    parts.append(f"Topic: {classification.topic}")
-    if classification.asset_exposure:
-        parts.append(f"Tickers: {', '.join(classification.asset_exposure)}")
+    parts.append(f"Category: {classification.category}")
+    if classification.tmt_subtopic:
+        parts.append(f"TMT sub-topic: {classification.tmt_subtopic}")
+    if classification.tickers:
+        parts.append(f"Tickers: {', '.join(classification.tickers)}")
     parts.append("")
 
     # The actual text
@@ -283,8 +323,31 @@ def extract_claim(
 
     # Ticker
     ticker = data.get("primary_ticker")
-    if not ticker and classification.asset_exposure:
-        ticker = classification.asset_exposure[0]
+    if not ticker and classification.tickers:
+        ticker = classification.tickers[0]
+
+    # Event type
+    event_type = data.get("event_type")
+    if event_type and event_type not in EVENT_TYPES:
+        event_type = None
+
+    # Descriptive event flag (with fallback derivation)
+    is_descriptive_event = data.get("is_descriptive_event", False)
+    if not is_descriptive_event and event_type and event_type != 'macro':
+        is_descriptive_event = (
+            classification.content_type == 'fact'
+            and time_sens in ('breaking', 'upcoming')
+        )
+
+    # Belief delta flag (with fallback derivation)
+    has_belief_delta = data.get("has_belief_delta", False)
+    if not has_belief_delta:
+        has_belief_delta = belief in ('contradicts_consensus', 'contradicts_prior_assumptions')
+
+    # Sector implication (macro claims only)
+    sector_implication = data.get("sector_implication")
+    if sector_implication and event_type != 'macro':
+        sector_implication = None  # Only valid for macro claims
 
     return ClaimOutput(
         chunk_id=chunk.chunk_id,
@@ -297,6 +360,11 @@ def extract_claim(
         time_sensitivity=time_sens,
         belief_pressure=belief,
         uncertainty_preserved=data.get("has_uncertainty", False),
+        category=classification.category,
+        event_type=event_type,
+        is_descriptive_event=is_descriptive_event,
+        has_belief_delta=has_belief_delta,
+        sector_implication=sector_implication,
     )
 
 
@@ -310,7 +378,7 @@ def extract_claims(
     Extract claims with judgment hooks from multiple chunks.
 
     Args:
-        chunks: List of chunks (typically from triage output)
+        chunks: List of chunks (post-classification, irrelevant already filtered)
         classifications: Corresponding classifications
         doc: Parent document
         client: Optional OpenAI client (reused)
@@ -329,6 +397,69 @@ def extract_claims(
 
     print(f"  Extracted {len(results)} claims" + " " * 20)
     return results
+
+
+# ------------------------------------------------------------------
+# Per-group claim cap (max 3 per ticker/subtopic/macro)
+# ------------------------------------------------------------------
+
+# Priority ordering for selecting the most important claims
+_TIME_PRIORITY = {'breaking': 0, 'upcoming': 1, 'ongoing': 2}
+_BELIEF_PRIORITY = {
+    'contradicts_consensus': 0,
+    'contradicts_prior_assumptions': 1,
+    'unclear': 2,
+    'confirms_consensus': 3,
+}
+
+MAX_CLAIMS_PER_GROUP = 3
+
+
+def _claim_sort_key(claim: ClaimOutput) -> tuple:
+    """Sort key: breaking + contrarian claims first."""
+    return (
+        _TIME_PRIORITY.get(claim.time_sensitivity, 9),
+        _BELIEF_PRIORITY.get(claim.belief_pressure, 9),
+    )
+
+
+def cap_claims_per_group(claims: List[ClaimOutput]) -> List[ClaimOutput]:
+    """
+    Keep at most MAX_CLAIMS_PER_GROUP per routing group.
+
+    Groups:
+    - tracked_ticker claims: grouped by ticker
+    - tmt_sector claims: grouped by tmt_subtopic
+    - macro claims: one group
+    - Other categories pass through uncapped
+
+    Within each group, keeps the most important claims first
+    (breaking > upcoming > ongoing, contrarian > confirming).
+    """
+    from collections import defaultdict
+
+    groups = defaultdict(list)
+    for claim in claims:
+        if claim.category == 'tracked_ticker' and claim.ticker:
+            groups[('ticker', claim.ticker)].append(claim)
+        elif claim.category == 'tmt_sector':
+            key = claim.event_type or 'general'  # fallback if no subtopic context
+            groups[('tmt', key)].append(claim)
+        elif claim.category == 'macro':
+            groups[('macro', 'macro')].append(claim)
+        else:
+            groups[('other', 'other')].append(claim)
+
+    capped = []
+    total_before = len(claims)
+    for key, group in groups.items():
+        group.sort(key=_claim_sort_key)
+        capped.extend(group[:MAX_CLAIMS_PER_GROUP])
+
+    dropped = total_before - len(capped)
+    if dropped:
+        print(f"  Capped claims: {total_before} → {len(capped)} (dropped {dropped} over-limit)")
+    return capped
 
 
 # ------------------------------------------------------------------
@@ -464,33 +595,44 @@ surpassed 300M, far exceeding analyst expectations of 200M. This
 represents a significant acceleration from 150M DAU reported last quarter.""",
             page_start=2,
         ),
+        Chunk(
+            chunk_id="chunk-4",
+            doc_id="doc-1",
+            text="""The Federal Reserve held interest rates steady at 5.25% in its latest
+meeting, signaling patience on rate cuts. Chair Powell noted inflation
+remains above target. Markets now expect the first cut in September.""",
+            page_start=4,
+        ),
     ]
 
     sample_classifications = [
         ChunkClassification(
             chunk_id="chunk-1",
-            topic="ai_ml",
-            topic_secondary="advertising",
-            asset_exposure=["META"],
+            category="tracked_ticker",
+            tickers=["META"],
             content_type="forecast",
             polarity="positive",
-            novelty="new",
         ),
         ChunkClassification(
             chunk_id="chunk-2",
-            topic="advertising",
-            asset_exposure=["META", "AAPL"],
+            category="tracked_ticker",
+            tickers=["META", "AAPL"],
             content_type="risk",
             polarity="negative",
-            novelty="new",
         ),
         ChunkClassification(
             chunk_id="chunk-3",
-            topic="social",
-            asset_exposure=["META"],
+            category="tracked_ticker",
+            tickers=["META"],
             content_type="fact",
             polarity="positive",
-            novelty="new",
+        ),
+        ChunkClassification(
+            chunk_id="chunk-4",
+            category="macro",
+            tickers=[],
+            content_type="fact",
+            polarity="neutral",
         ),
     ]
 
@@ -545,6 +687,30 @@ represents a significant acceleration from 150M DAU reported last quarter.""",
         contrarian = filter_by_belief_pressure(claims, ['contradicts_consensus', 'contradicts_prior_assumptions'])
         print(f"✓ Found {len(contrarian)} contrarian claims")
 
+        # MECE section routing fields
+        assert all(hasattr(c, 'event_type') for c in claims)
+        print("✓ All claims have event_type field")
+
+        assert all(hasattr(c, 'is_descriptive_event') for c in claims)
+        print("✓ All claims have is_descriptive_event field")
+
+        assert all(hasattr(c, 'has_belief_delta') for c in claims)
+        print("✓ All claims have has_belief_delta field")
+
+        # Check macro claim gets sector_implication
+        macro_claims = [c for c in claims if c.event_type == 'macro']
+        print(f"✓ Found {len(macro_claims)} macro claims")
+        for mc in macro_claims:
+            print(f"  sector_implication: {mc.sector_implication}")
+
+        # Check descriptive events
+        descriptive = [c for c in claims if c.is_descriptive_event]
+        print(f"✓ Found {len(descriptive)} descriptive events")
+
+        # Check belief deltas
+        deltas = [c for c in claims if c.has_belief_delta]
+        print(f"✓ Found {len(deltas)} claims with belief delta")
+
     else:
         print("\nNo OPENAI_API_KEY found. Showing sample output structure:\n")
 
@@ -562,12 +728,45 @@ represents a significant acceleration from 150M DAU reported last quarter.""",
             time_sensitivity="breaking",
             belief_pressure="contradicts_consensus",
             uncertainty_preserved=False,
+            category="tracked_ticker",
+            event_type="guidance",
+            is_descriptive_event=True,
+            has_belief_delta=True,
+        )
+
+        macro_claim = ClaimOutput(
+            chunk_id="chunk-4",
+            doc_id="doc-1",
+            bullets=["Fed held rates steady at 5.25%, signaling patience on cuts"],
+            ticker=None,
+            claim_type="fact",
+            source_citation="Macro, 2026-01-25",
+            confidence_level="high",
+            time_sensitivity="breaking",
+            belief_pressure="confirms_consensus",
+            uncertainty_preserved=False,
+            category="macro",
+            event_type="macro",
+            is_descriptive_event=True,
+            has_belief_delta=False,
+            sector_implication="Higher rates extend pressure on unprofitable software multiples",
         )
 
         print("Sample ClaimOutput:")
         print(json.dumps(sample_claim.to_dict(), indent=2))
 
+        print("\nMacro ClaimOutput:")
+        print(json.dumps(macro_claim.to_dict(), indent=2))
+
         print("\nFormatted markdown:")
         print(sample_claim.format_markdown())
 
         print("\nJudgment summary:", sample_claim.judgment_summary())
+
+        # Verify new fields exist
+        assert sample_claim.event_type == "guidance"
+        assert sample_claim.is_descriptive_event is True
+        assert sample_claim.has_belief_delta is True
+        assert macro_claim.event_type == "macro"
+        assert macro_claim.sector_implication is not None
+        print("\n✓ All MECE routing fields validated")

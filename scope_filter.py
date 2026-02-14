@@ -16,7 +16,7 @@ from typing import List, Optional, Dict, Tuple
 import re
 
 from claim_extractor import ClaimOutput
-from classifier import TMT_TOPICS
+from config import ALL_TICKERS
 
 
 # ------------------------------------------------------------------
@@ -77,25 +77,11 @@ class ScopeFilterResult:
         return '\n'.join(lines)
 
 
-# ------------------------------------------------------------------
-# TMT Sector Mapping
-# ------------------------------------------------------------------
-
-# Topics that belong to TMT sector (from classifier.py)
-TMT_SECTOR_TOPICS = set()
-for category, topics in TMT_TOPICS.items():
-    TMT_SECTOR_TOPICS.update(topics)
-
-# Mapping from sub-sector to topics
-SUBSECTOR_TOPICS = {
-    'technology': {'ai_ml', 'cloud', 'software', 'infrastructure', 'semiconductors', 'hardware'},
-    'media': {'advertising', 'content', 'gaming', 'social'},
-    'telecom': {'networks', 'telecom_infra'},
-    'other': {'ecommerce', 'fintech', 'cybersecurity', 'general'},
-}
-
 # Thin-day threshold: if fewer than this many claims, mark as thin
 THIN_DAY_THRESHOLD = 3
+
+# Valid categories (from classifier.py)
+VALID_CATEGORIES = {'tracked_ticker', 'tmt_sector', 'macro'}
 
 
 # ------------------------------------------------------------------
@@ -117,16 +103,11 @@ def _extract_analyst_from_citation(citation: str) -> Optional[str]:
     return None
 
 
-def _get_claim_topic(claim: ClaimOutput) -> Optional[str]:
-    """
-    Infer topic from claim. Since ClaimOutput doesn't store topic directly,
-    we pass it through from classification during filtering.
-    Returns None if topic unknown.
-    """
-    # Topic is stored in claim_type (fact/forecast/risk/interpretation)
-    # which is different from the topic taxonomy.
-    # We need to rely on ticker mapping or text analysis.
-    return None
+def _category_in_scope(category: Optional[str]) -> bool:
+    """Check if claim category is valid (not irrelevant)."""
+    if category is None:
+        return True  # Legacy claims without category — keep
+    return category in VALID_CATEGORIES
 
 
 def _ticker_in_scope(ticker: Optional[str], ticker_whitelist: Optional[List[str]]) -> bool:
@@ -159,7 +140,6 @@ def _analyst_in_scope(citation: str, analyst_whitelist: Optional[List[str]]) -> 
 def apply_scope_filter(
     claims: List[ClaimOutput],
     scope: Optional[BriefingScope] = None,
-    topic_map: Optional[Dict[str, str]] = None,
 ) -> ScopeFilterResult:
     """
     Filter claims by sector scope.
@@ -167,8 +147,6 @@ def apply_scope_filter(
     Args:
         claims: List of ClaimOutput from claim extraction
         scope: BriefingScope config (defaults to TMT-all if None)
-        topic_map: Optional mapping from chunk_id to topic
-                   (for sector filtering when topics available)
 
     Returns:
         ScopeFilterResult with filtered claims and metadata
@@ -192,6 +170,10 @@ def apply_scope_filter(
     filtered = []
 
     for claim in claims:
+        # Category filter — drop irrelevant (should already be gone, safety net)
+        if not _category_in_scope(getattr(claim, 'category', None)):
+            continue
+
         # Check ticker whitelist
         if not _ticker_in_scope(claim.ticker, scope.ticker_whitelist):
             continue
@@ -199,15 +181,6 @@ def apply_scope_filter(
         # Check analyst whitelist
         if not _analyst_in_scope(claim.source_citation, scope.analyst_whitelist):
             continue
-
-        # Topic filtering (if topic_map provided)
-        if topic_map and scope.sub_sectors:
-            topic = topic_map.get(claim.chunk_id, 'general')
-            allowed_topics = set()
-            for subsec in scope.sub_sectors:
-                allowed_topics.update(SUBSECTOR_TOPICS.get(subsec, set()))
-            if topic not in allowed_topics and topic != 'general':
-                continue
 
         # Passed all filters
         filtered.append(claim)
@@ -256,18 +229,12 @@ DEFAULT_TMT_SCOPE = BriefingScope(
     ticker_whitelist=None,
 )
 
-# Internet + Software focus (from config.py)
+# Internet + Software focus — uses config.ALL_TICKERS as single source of truth
 INTERNET_SOFTWARE_SCOPE = BriefingScope(
     primary_sector='TMT',
-    sub_sectors=['technology', 'media'],
+    sub_sectors=['technology', 'media', 'other'],  # 'other' includes cybersecurity (CRWD, ZS, PANW)
     analyst_whitelist=None,
-    ticker_whitelist=[
-        # Primary coverage
-        'META', 'GOOGL', 'AMZN', 'AAPL', 'BABA', 'MSFT',
-        'CRWD', 'ZS', 'PANW', 'NET', 'DDOG', 'SNOW', 'MDB',
-        # Watchlist
-        'NFLX', 'SPOT', 'U', 'APP', 'RBLX', 'ORCL', 'PLTR', 'SHOP',
-    ],
+    ticker_whitelist=ALL_TICKERS,
 )
 
 

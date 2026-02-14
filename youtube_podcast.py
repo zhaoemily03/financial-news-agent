@@ -185,6 +185,18 @@ class AllInPodcast(YouTubePodcast):
     HOSTS = ["Chamath Palihapitiya", "Jason Calacanis", "David Sacks", "David Friedberg"]
 
 
+class A16ZPodcast(YouTubePodcast):
+    """
+    a16z - Andreessen Horowitz
+
+    Topics: Tech trends, AI, crypto, bio, enterprise, venture capital
+    """
+    PODCAST_NAME = "a16z"
+    PODCAST_URL = "https://www.youtube.com/@a16z"
+    CHANNEL_ID = "UC9cn0TuPq4dnbTY-CBsm8XA"
+    HOSTS = ["Marc Andreessen", "Ben Horowitz"]
+
+
 # ------------------------------------------------------------------
 # Entry point for testing
 # ------------------------------------------------------------------

@@ -1,75 +1,67 @@
-# Daily Briefing Template
+# One-Stop Shop Financial Digest — Logic & Design
 
-**Maximum Length:** 5 pages
+**Objective Function:** A one-stop-shop to test, challenge, and formulate convictions for maximizing financial return in secondaries trading portfolio
 
----
+**Purpose:** Comprehensive TMT and ticker digest from sell-side, podcast, blog, social media
 
-## Tier 1: What Demands Attention Today
-**Urgent, can't miss**
-
-### Something Broke Overnight
-- Earnings misses/beats
-- Rating changes (upgrades/downgrades)
-- Breaking news events
-- Material price movements
-
-### Something Is About to Happen
-- Earnings scheduled (today/this week)
-- Known catalysts approaching
-- Regulatory deadlines
-- Conference presentations
-
-### Something Contradicts What I Believe
-- Data/reports that challenge current thesis
-- Unexpected analyst takes
-- Divergent market reactions
+**Maximum Length:** 5 pages | **Target Read Time:** <15 minutes
 
 ---
 
-## Tier 2: What's the Signal from the Noise
-**Important, not urgent**
+## Information Stream Tiers (easiest → hardest access)
 
-### Synthesis Across All Reports
-- Common themes emerging across sources
-- The through-line connecting disparate reports
-- What are multiple sources saying about the same topic?
-
-### Analyst Consensus vs. Divergence
-- Where are sell-side analysts agreeing?
-- Where are they disagreeing?
-- Outlier opinions worth noting
-
-### Quantitative vs. Qualitative Divergences
-- When the numbers tell one story but the narrative says another
-- Discrepancies between financial data and analyst sentiment
-- Market pricing vs. fundamental outlook
+1. Open access
+2. Member (free)
+3. Member (paid)
+4. Member with two-factor authentication
 
 ---
 
-## Tier 3: How Does This Affect My Work
-**Reference**
+## Briefing Layout
 
-### Implications for Covered Stocks
-- Direct impact on tickers I'm tracking
-- Sector-wide implications
-- Relative value considerations
+### Section 1: Objective Breaking News
 
-### Implications for Investment Theses
-- How does this support/contradict current themes?
-- New evidence for thesis development
-- Risks to monitor
+- **Per-ticker updates:** Explicit update on each ticker being tracked and in the watchlist. If no updates, say "No Update"
+- **TMT sector-level update:** Sector-wide developments affecting coverage universe
 
-### Exploration Opportunities
-- New areas worth investigating
-- Emerging trends to research
-- Data gaps to fill
+### Section 2: Synthesis Across Sources
+
+- Look at *all* claims surfaced and ask LLM: where do perspectives agree and where do they diverge, considering the biases and credibility of each source
+- **Written in narrative style** (not bullet points)
+
+### Section 3: Macro Connections
+
+- Collect global news using keywords that have implications on stock performance
+- Economic and geopolitical news: unemployment, US election cycles and federal policy, consumer confidence, trade relations and tariffs
+
+### Section 4: Longitudinal Delta Detection
+
+- **Sentiment drift** against previously logged and filed claims by this tool
+- Check the synthesis of each day for the past month, or the same time in the previous couple earning cycles, to see if language or sentiment has changed (confidence, belief, importance)
+- Later: check each ticker longitudinally, each thesis longitudinally
+
+---
+
+## Pipeline
+
+Scrape → Normalize → Chunk → Classify (ticker, TMT, macro, or discard as irrelevant) → Atomize classified chunks into claims for Section 1 → File and organize claims under their respective classification with date stamp and source → Synthesize using LLM for Section 2
+
+---
+
+## Development Phases
+
+| Phase | Focus |
+|-------|-------|
+| **Phase 1** | Core pipeline (current) |
+| **Phase 2** | Macro Connections section → Longitudinal Delta Detection section |
+| **Phase 3** | Thesis stress-testing: comparing "house views" to current day news to "historical experience" |
 
 ---
 
 ## Format Guidelines
 
-- **Concise bullet points** - No lengthy paragraphs
-- **Source attribution** - Brief citation (e.g., "JPM, 1/21" or "Substack: Author Name")
-- **Actionability** - Focus on "what does this mean" not "what happened"
-- **Prioritization** - Most critical items first within each tier
-- **Visual hierarchy** - Use bold for key terms, tickers, catalysts
+- **Source attribution** — Brief citation (e.g., "JPM, 1/21" or "Substack: Author Name")
+- **Per-ticker completeness** — Every tracked ticker gets a line, even if "No Update"
+- **Section 2 is narrative** — Prose, not bullets
+- **Prioritization** — Most critical items first within each section
+- **Visual hierarchy** — Bold for key terms, tickers, catalysts

@@ -1,34 +1,42 @@
 """
-Tier 2 Synthesis — signal vs noise, structure not conclusions.
-Helps humans see patterns without deciding for them.
+Section 2 Synthesis — Synthesis Across Sources.
+Helps humans see where analysts agree and disagree, considering source credibility.
 
 Synthesis answers ONLY:
-- Where are analysts agreeing?
+- Where are sources agreeing?
 - Where are they disagreeing?
-- What changed vs prior day?
+- What source biases/credibility should the reader weigh?
+
+Output: LLM-generated narrative prose (2-3 paragraphs, no bullets).
 
 Constraints:
-- Bullet points only
-- Cite claim IDs
 - No recommendations
-- No thesis language
+- No thesis language (bullish, bearish, should, recommend)
+- Cite sources by name
 - If no disagreement exists, say so explicitly
 
 Usage:
-    from tier2_synthesizer import synthesize_tier2, Tier2Synthesis
+    from tier2_synthesizer import synthesize_section2, Section2Synthesis
 
-    synthesis = synthesize_tier2(claims, prior_claims=None)
-    print(synthesis.format_markdown())
+    synthesis = synthesize_section2(claims)
+    print(synthesis.narrative)
 """
 
-from typing import List, Dict, Set, Optional, Tuple
+import json
+import os
+from typing import List, Optional, Tuple
 from dataclasses import dataclass, field
 from collections import defaultdict
+from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from claim_extractor import ClaimOutput
+from analyst_config_tmt import SOURCE_CREDIBILITY
 
 # ------------------------------------------------------------------
-# Synthesis Result
+# Result Dataclasses
 # ------------------------------------------------------------------
 
 @dataclass
@@ -37,93 +45,41 @@ class AgreementCluster:
     topic: str                    # What they agree on (ticker or theme)
     claim_ids: List[str]          # Participating claim IDs
     summary: str                  # One-line description (no judgment)
-    specifics: List[str] = field(default_factory=list)  # Actual claim content for detail
+    specifics: List[str] = field(default_factory=list)
 
 
 @dataclass
 class DisagreementCluster:
     """Claims that disagree on a point."""
     topic: str                    # What they disagree about
-    side_a_ids: List[str]         # Claim IDs on one side
-    side_b_ids: List[str]         # Claim IDs on other side
-    side_a_position: str          # Brief position A (with specifics)
-    side_b_position: str          # Brief position B (with specifics)
-    side_a_specifics: List[str] = field(default_factory=list)  # Actual claim content
-    side_b_specifics: List[str] = field(default_factory=list)  # Actual claim content
+    side_a_ids: List[str]
+    side_b_ids: List[str]
+    side_a_position: str          # Brief position A
+    side_b_position: str          # Brief position B
+    side_a_specifics: List[str] = field(default_factory=list)
+    side_b_specifics: List[str] = field(default_factory=list)
 
 
 @dataclass
-class DeltaItem:
-    """Something that changed vs prior day."""
-    claim_id: str
-    description: str              # What changed
-    prior_state: Optional[str]    # What it was before (if known)
-
-
-@dataclass
-class Tier2Synthesis:
-    """Structured synthesis of Tier 2 signals."""
+class Section2Synthesis:
+    """Section 2 output: narrative + structured data."""
+    narrative: str = ""           # LLM-generated prose (2-3 paragraphs)
     agreements: List[AgreementCluster] = field(default_factory=list)
     disagreements: List[DisagreementCluster] = field(default_factory=list)
-    deltas: List[DeltaItem] = field(default_factory=list)
-    no_disagreement: bool = False  # True if explicitly no disagreement found
-
-    def format_markdown(self) -> str:
-        """Format synthesis as markdown bullets with specific claim content."""
-        lines = []
-
-        # Agreements - show WHAT they agree on
-        lines.append("### Where Analysts Agree")
-        if self.agreements:
-            for ag in self.agreements:
-                lines.append(f"- **{ag.topic}**: {ag.summary}")
-                # Show specifics so analyst knows exactly what's agreed
-                for specific in ag.specifics[:2]:
-                    lines.append(f"  - {specific}")
-        else:
-            lines.append("- *No clear agreement clusters detected.*")
-        lines.append("")
-
-        # Disagreements - show WHAT they disagree on
-        lines.append("### Where Analysts Disagree")
-        if self.disagreements:
-            for dg in self.disagreements:
-                lines.append(f"- **{dg.topic}**:")
-                lines.append(f"  - {dg.side_a_position}")
-                lines.append(f"  - {dg.side_b_position}")
-        elif self.no_disagreement:
-            lines.append("- *No disagreement detected across sources.*")
-        else:
-            lines.append("- *Insufficient overlap to detect disagreement.*")
-        lines.append("")
-
-        # Deltas
-        lines.append("### What Changed vs Prior Day")
-        if self.deltas:
-            for delta in self.deltas:
-                if delta.prior_state:
-                    lines.append(f"- {delta.description} (was: {delta.prior_state})")
-                else:
-                    lines.append(f"- {delta.description}")
-        else:
-            lines.append("- *No prior day data available for comparison.*")
-
-        return '\n'.join(lines)
+    no_disagreement: bool = False
 
     def has_content(self) -> bool:
-        """Check if synthesis has meaningful content."""
-        return bool(self.agreements or self.disagreements or self.deltas)
+        return bool(self.narrative or self.agreements or self.disagreements)
 
 
 # ------------------------------------------------------------------
-# Agreement Detection
+# Agreement Detection (deterministic)
 # ------------------------------------------------------------------
 
 def _detect_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster]:
     """
     Find claims that agree (same ticker/theme + same polarity direction).
     Agreement = multiple claims pointing same direction on same topic.
-    Now includes theme-based and macro topics, not just tickers.
     """
     agreements = []
 
@@ -142,8 +98,7 @@ def _detect_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster]:
                        if c.belief_pressure in ('contradicts_consensus', 'contradicts_prior_assumptions')]
 
         if len(confirms) >= 2:
-            # Extract specifics from actual claim content
-            specifics = [c.bullets[0][:100] for c in confirms[:3]]
+            specifics = [c.bullets[0] for c in confirms[:3]]
             agreements.append(AgreementCluster(
                 topic=ticker,
                 claim_ids=[c.chunk_id for c in confirms],
@@ -152,7 +107,7 @@ def _detect_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster]:
             ))
 
         if len(contradicts) >= 2:
-            specifics = [c.bullets[0][:100] for c in contradicts[:3]]
+            specifics = [c.bullets[0] for c in contradicts[:3]]
             agreements.append(AgreementCluster(
                 topic=f"{ticker} (contrarian)",
                 claim_ids=[c.chunk_id for c in contradicts],
@@ -160,7 +115,7 @@ def _detect_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster]:
                 specifics=specifics,
             ))
 
-    # Group by theme/topic keywords (macro, sector, etc.)
+    # Theme-based agreements
     theme_agreements = _detect_theme_agreements(claims)
     agreements.extend(theme_agreements)
 
@@ -168,14 +123,12 @@ def _detect_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster]:
 
 
 def _extract_agreement_summary(claims: List[ClaimOutput], topic: str, contrarian: bool = False) -> str:
-    """Extract a specific summary of what claims agree on, using actual content."""
+    """Extract a summary of what claims agree on, using actual content."""
     if not claims:
         return f"Multiple sources {'challenge' if contrarian else 'confirm'} view on {topic}"
 
-    # Find common keywords/phrases in the claims
     all_text = ' '.join(c.bullets[0].lower() for c in claims)
 
-    # Look for specific metrics or concepts
     keywords = []
     if 'revenue' in all_text or 'growth' in all_text:
         keywords.append('revenue trajectory')
@@ -194,7 +147,6 @@ def _extract_agreement_summary(claims: List[ClaimOutput], topic: str, contrarian
             return f"Multiple sources raise concerns about {topic} {focus}"
         return f"Multiple sources aligned on {topic} {focus}"
 
-    # Default to first claim's content as summary
     first_bullet = claims[0].bullets[0][:80]
     if contrarian:
         return f"Sources challenge consensus: {first_bullet}"
@@ -202,10 +154,9 @@ def _extract_agreement_summary(claims: List[ClaimOutput], topic: str, contrarian
 
 
 def _detect_theme_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster]:
-    """Detect agreement on themes/macro topics (not tied to specific tickers)."""
+    """Detect agreement on themes/macro topics."""
     theme_agreements = []
 
-    # Theme keywords to look for
     MACRO_THEMES = {
         'AI/ML': ['ai', 'artificial intelligence', 'machine learning', 'llm', 'gpu', 'inference'],
         'Cloud': ['cloud', 'aws', 'azure', 'gcp', 'iaas', 'paas', 'saas'],
@@ -215,7 +166,6 @@ def _detect_theme_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster
         'Consumer': ['consumer', 'spending', 'retail', 'demand'],
     }
 
-    # Group claims by detected theme
     by_theme = defaultdict(list)
     for claim in claims:
         text = claim.bullets[0].lower() if claim.bullets else ''
@@ -227,13 +177,12 @@ def _detect_theme_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster
         if len(theme_claims) < 2:
             continue
 
-        # Check for alignment
         confirms = [c for c in theme_claims if c.belief_pressure == 'confirms_consensus']
         contradicts = [c for c in theme_claims
                        if c.belief_pressure in ('contradicts_consensus', 'contradicts_prior_assumptions')]
 
         if len(confirms) >= 2:
-            specifics = [c.bullets[0][:100] for c in confirms[:3]]
+            specifics = [c.bullets[0] for c in confirms[:3]]
             theme_agreements.append(AgreementCluster(
                 topic=f"{theme} (theme)",
                 claim_ids=[c.chunk_id for c in confirms],
@@ -242,7 +191,7 @@ def _detect_theme_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster
             ))
 
         if len(contradicts) >= 2:
-            specifics = [c.bullets[0][:100] for c in contradicts[:3]]
+            specifics = [c.bullets[0] for c in contradicts[:3]]
             theme_agreements.append(AgreementCluster(
                 topic=f"{theme} concerns",
                 claim_ids=[c.chunk_id for c in contradicts],
@@ -254,19 +203,17 @@ def _detect_theme_agreements(claims: List[ClaimOutput]) -> List[AgreementCluster
 
 
 # ------------------------------------------------------------------
-# Disagreement Detection
+# Disagreement Detection (deterministic)
 # ------------------------------------------------------------------
 
 def _detect_disagreements(claims: List[ClaimOutput]) -> Tuple[List[DisagreementCluster], bool]:
     """
     Find claims that disagree (same ticker/theme + opposite positions).
     Returns (disagreements, no_disagreement_flag).
-    Now includes specific claim content for clarity.
     """
     disagreements = []
     found_any_potential = False
 
-    # Group by ticker
     by_ticker = defaultdict(list)
     for claim in claims:
         if claim.ticker:
@@ -282,31 +229,29 @@ def _detect_disagreements(claims: List[ClaimOutput]) -> Tuple[List[DisagreementC
         contradicts = [c for c in ticker_claims
                        if c.belief_pressure in ('contradicts_consensus', 'contradicts_prior_assumptions')]
 
-        # Disagreement = some confirm, some contradict
         if confirms and contradicts:
-            # Extract specific positions from actual claims
-            side_a_specific = confirms[0].bullets[0][:100] if confirms else ""
-            side_b_specific = contradicts[0].bullets[0][:100] if contradicts else ""
+            side_a_specific = confirms[0].bullets[0] if confirms else ""
+            side_b_specific = contradicts[0].bullets[0] if contradicts else ""
 
             disagreements.append(DisagreementCluster(
                 topic=ticker,
                 side_a_ids=[c.chunk_id for c in confirms],
                 side_b_ids=[c.chunk_id for c in contradicts],
-                side_a_position=f"Bullish: {side_a_specific}",
-                side_b_position=f"Cautious: {side_b_specific}",
-                side_a_specifics=[c.bullets[0][:80] for c in confirms[:2]],
-                side_b_specifics=[c.bullets[0][:80] for c in contradicts[:2]],
+                side_a_position=f"Consensus view: {side_a_specific}",
+                side_b_position=f"Contrarian view: {side_b_specific}",
+                side_a_specifics=[c.bullets[0] for c in confirms[:2]],
+                side_b_specifics=[c.bullets[0] for c in contradicts[:2]],
             ))
 
-        # Also check for content_type disagreement (forecast vs risk)
+        # Forecast vs risk disagreement
         forecasts = [c for c in ticker_claims if c.claim_type == 'forecast']
         risks = [c for c in ticker_claims if c.claim_type == 'risk']
 
         if forecasts and risks:
             existing_topics = {d.topic for d in disagreements}
             if f"{ticker} outlook" not in existing_topics:
-                forecast_text = forecasts[0].bullets[0][:80] if forecasts else ""
-                risk_text = risks[0].bullets[0][:80] if risks else ""
+                forecast_text = forecasts[0].bullets[0] if forecasts else ""
+                risk_text = risks[0].bullets[0] if risks else ""
 
                 disagreements.append(DisagreementCluster(
                     topic=f"{ticker} outlook",
@@ -314,8 +259,8 @@ def _detect_disagreements(claims: List[ClaimOutput]) -> Tuple[List[DisagreementC
                     side_b_ids=[c.chunk_id for c in risks],
                     side_a_position=f"Positive outlook: {forecast_text}",
                     side_b_position=f"Risk factors: {risk_text}",
-                    side_a_specifics=[c.bullets[0][:80] for c in forecasts[:2]],
-                    side_b_specifics=[c.bullets[0][:80] for c in risks[:2]],
+                    side_a_specifics=[c.bullets[0] for c in forecasts[:2]],
+                    side_b_specifics=[c.bullets[0] for c in risks[:2]],
                 ))
 
     # Theme-based disagreements
@@ -325,7 +270,6 @@ def _detect_disagreements(claims: List[ClaimOutput]) -> Tuple[List[DisagreementC
         found_any_potential = True
 
     no_disagreement = found_any_potential and len(disagreements) == 0
-
     return disagreements, no_disagreement
 
 
@@ -356,8 +300,8 @@ def _detect_theme_disagreements(claims: List[ClaimOutput]) -> List[DisagreementC
                        if c.belief_pressure in ('contradicts_consensus', 'contradicts_prior_assumptions')]
 
         if confirms and contradicts:
-            side_a = confirms[0].bullets[0][:80] if confirms else ""
-            side_b = contradicts[0].bullets[0][:80] if contradicts else ""
+            side_a = confirms[0].bullets[0] if confirms else ""
+            side_b = contradicts[0].bullets[0] if contradicts else ""
 
             theme_disagreements.append(DisagreementCluster(
                 topic=f"{theme} (theme)",
@@ -365,128 +309,214 @@ def _detect_theme_disagreements(claims: List[ClaimOutput]) -> List[DisagreementC
                 side_b_ids=[c.chunk_id for c in contradicts],
                 side_a_position=f"Positive: {side_a}",
                 side_b_position=f"Concerns: {side_b}",
-                side_a_specifics=[c.bullets[0][:80] for c in confirms[:2]],
-                side_b_specifics=[c.bullets[0][:80] for c in contradicts[:2]],
+                side_a_specifics=[c.bullets[0] for c in confirms[:2]],
+                side_b_specifics=[c.bullets[0] for c in contradicts[:2]],
             ))
 
     return theme_disagreements
 
 
 # ------------------------------------------------------------------
-# Delta Detection (vs prior day)
+# LLM Narrative Generation (Section 2)
 # ------------------------------------------------------------------
 
-def _detect_deltas(
+NARRATIVE_SYSTEM_PROMPT = """You are a hedge fund analyst reading across all materials for a daily TMT briefing.
+
+Your job: Compare perspectives across sources — do NOT summarize sequentially.
+Weight conflicting views by source credibility scores provided.
+
+WHAT TO SURFACE:
+- Strong conviction — sources expressing high confidence or doubling down
+- Softening tone — language shifting from definitive to hedged ("may", "could", "risks")
+- Hedging language — qualifiers that weaken prior positions
+- Explicit disagreement — sources taking opposite sides on the same topic
+- Emerging narratives — new themes appearing across multiple sources
+
+SENTIMENT DRIFT:
+- If a source's tone has shifted vs prior positioning, call it out
+- If tone has NOT changed, state "No material drift" for that topic
+- If nothing happened for a ticker, state "No Update"
+
+RULES:
+- Write in clear, direct prose (no bullet points, no headers)
+- Cite sources by name (e.g., "Jefferies notes...", "Morgan Stanley argues...")
+- Do NOT use thesis language: no "bullish", "bearish", "should", "recommend", "buy", "sell"
+- Do NOT add your own opinion or judgment
+- Do NOT repeat claims verbatim — synthesize across them
+- Keep total output under 200 words
+- Write for a professional analyst who has already read Section 1"""
+
+
+def _build_narrative_prompt(
     claims: List[ClaimOutput],
-    prior_claims: Optional[List[ClaimOutput]] = None,
-) -> List[DeltaItem]:
-    """
-    Find what changed vs prior day.
-    If no prior_claims provided, detect "breaking" as proxy for change.
-    """
-    deltas = []
+    agreements: List[AgreementCluster],
+    disagreements: List[DisagreementCluster],
+    no_disagreement: bool,
+) -> str:
+    """Build the user prompt for narrative generation."""
+    parts = []
 
-    if prior_claims:
-        # Compare current vs prior by ticker
-        prior_by_ticker = defaultdict(list)
-        for c in prior_claims:
-            if c.ticker:
-                prior_by_ticker[c.ticker].append(c)
+    # Source credibility context
+    sources_seen = set()
+    for c in claims:
+        if c.source_citation:
+            source = c.source_citation.split(',')[0].strip()
+            sources_seen.add(source)
 
-        current_by_ticker = defaultdict(list)
-        for c in claims:
-            if c.ticker:
-                current_by_ticker[c.ticker].append(c)
+    if sources_seen:
+        cred_lines = []
+        for s in sorted(sources_seen):
+            score = SOURCE_CREDIBILITY.get(s.lower(), 0.3)
+            cred_lines.append(f"  {s}: credibility {score}")
+        parts.append("Source credibility scores:")
+        parts.extend(cred_lines)
+        parts.append("")
 
-        # Find tickers with changed stance
-        for ticker in current_by_ticker:
-            current = current_by_ticker[ticker]
-            prior = prior_by_ticker.get(ticker, [])
+    # ALL claims — primary input for the LLM to read across
+    parts.append("TODAY'S CLAIMS (read all, find your own connections):")
+    for c in claims:
+        source = c.source_citation.split(',')[0].strip() if c.source_citation else 'Unknown'
+        ticker_tag = f"[{c.ticker}]" if c.ticker else "[Sector/Macro]"
+        conf = c.confidence_level
+        pressure = c.belief_pressure
+        parts.append(f"- {ticker_tag} {c.bullets[0]} ({source}, confidence={conf}, pressure={pressure})")
+    parts.append("")
 
-            if not prior:
-                # New ticker coverage
-                for c in current:
-                    deltas.append(DeltaItem(
-                        claim_id=c.chunk_id,
-                        description=f"New coverage on {ticker}",
-                        prior_state=None,
-                    ))
-            else:
-                # Check for belief_pressure changes
-                prior_pressures = {c.belief_pressure for c in prior}
-                for c in current:
-                    if c.belief_pressure not in prior_pressures:
-                        deltas.append(DeltaItem(
-                            claim_id=c.chunk_id,
-                            description=f"Stance change on {ticker}: now {c.belief_pressure}",
-                            prior_state=f"was {', '.join(prior_pressures)}",
-                        ))
-
+    # Deterministic hints — scaffolding, not constraints
+    parts.append("DETECTED PATTERNS (hints — you may find additional connections):")
+    parts.append("")
+    parts.append("Agreement clusters:")
+    if agreements:
+        for ag in agreements:
+            parts.append(f"- {ag.topic}: {ag.summary}")
     else:
-        # No prior data: use time_sensitivity=breaking as proxy for "new"
-        for claim in claims:
-            if claim.time_sensitivity == 'breaking':
-                deltas.append(DeltaItem(
-                    claim_id=claim.chunk_id,
-                    description=f"Breaking: {claim.bullets[0][:60]}...",
-                    prior_state=None,
-                ))
+        parts.append("- None detected deterministically")
 
-    return deltas
+    parts.append("")
+    parts.append("Disagreement clusters:")
+    if disagreements:
+        for dg in disagreements:
+            parts.append(f"- {dg.topic}: {dg.side_a_position} vs. {dg.side_b_position}")
+    elif no_disagreement:
+        parts.append("- No disagreement detected across sources today")
+    else:
+        parts.append("- Insufficient overlap to detect disagreement")
+    parts.append("")
+
+    parts.append("Write a 2-3 paragraph synthesis. Compare perspectives — don't summarize source by source.")
+    parts.append("You are NOT limited to the detected patterns above. Find any connections, tensions, or emerging themes across the full claim set.")
+    parts.append("Flag conviction strength, softening tone, hedging, and emerging narratives.")
+    parts.append("State 'No material drift' where tone is unchanged. Weigh conflicting views by source credibility.")
+
+    return '\n'.join(parts)
+
+
+def generate_section2_narrative(
+    claims: List[ClaimOutput],
+    agreements: List[AgreementCluster],
+    disagreements: List[DisagreementCluster],
+    no_disagreement: bool = False,
+    client: Optional[OpenAI] = None,
+) -> str:
+    """
+    Generate narrative prose for Section 2 via LLM.
+
+    Returns: 2-3 paragraph markdown string.
+    Falls back to structured bullets if no API key.
+    """
+    if client is None:
+        if not os.getenv("OPENAI_API_KEY"):
+            return _fallback_narrative(agreements, disagreements, no_disagreement)
+        client = OpenAI()
+
+    prompt = _build_narrative_prompt(claims, agreements, disagreements, no_disagreement)
+
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.3,
+        max_tokens=500,
+    )
+
+    return response.choices[0].message.content.strip()
+
+
+def _fallback_narrative(
+    agreements: List[AgreementCluster],
+    disagreements: List[DisagreementCluster],
+    no_disagreement: bool,
+) -> str:
+    """Structured fallback when no API key available."""
+    lines = []
+
+    if agreements:
+        lines.append("**Where sources agree:**")
+        for ag in agreements:
+            lines.append(f"- {ag.topic}: {ag.summary}")
+    else:
+        lines.append("No clear agreement clusters detected across sources.")
+
+    lines.append("")
+
+    if disagreements:
+        lines.append("**Where sources disagree:**")
+        for dg in disagreements:
+            lines.append(f"- {dg.topic}: {dg.side_a_position} vs. {dg.side_b_position}")
+    elif no_disagreement:
+        lines.append("No disagreement detected across sources today.")
+    else:
+        lines.append("Insufficient source overlap to detect disagreement.")
+
+    return '\n'.join(lines)
 
 
 # ------------------------------------------------------------------
 # Main Synthesis Function
 # ------------------------------------------------------------------
 
-def synthesize_tier2(
+def synthesize_section2(
     claims: List[ClaimOutput],
-    prior_claims: Optional[List[ClaimOutput]] = None,
-) -> Tier2Synthesis:
+    client: Optional[OpenAI] = None,
+) -> Section2Synthesis:
     """
-    Synthesize Tier 2 signals into structured bullets.
-
-    Answers ONLY:
-    - Where are analysts agreeing?
-    - Where are they disagreeing?
-    - What changed vs prior day?
+    Synthesize Section 2: detect patterns deterministically,
+    then generate narrative prose via LLM.
 
     Args:
-        claims: Current day's claims (typically Tier 2 from tier_router)
-        prior_claims: Optional prior day's claims for delta detection
+        claims: All claims for the day (any category)
+        client: Optional OpenAI client
 
     Returns:
-        Tier2Synthesis with agreements, disagreements, and deltas
+        Section2Synthesis with narrative + structured data
     """
     if not claims:
-        return Tier2Synthesis(no_disagreement=True)
+        return Section2Synthesis(
+            narrative="No claims available for synthesis.",
+            no_disagreement=True,
+        )
 
-    # Detect patterns
+    # Deterministic pattern detection
     agreements = _detect_agreements(claims)
     disagreements, no_disagreement = _detect_disagreements(claims)
-    deltas = _detect_deltas(claims, prior_claims)
 
-    return Tier2Synthesis(
+    # LLM narrative generation
+    narrative = generate_section2_narrative(
+        claims, agreements, disagreements, no_disagreement, client
+    )
+
+    return Section2Synthesis(
+        narrative=narrative,
         agreements=agreements,
         disagreements=disagreements,
-        deltas=deltas,
         no_disagreement=no_disagreement,
     )
 
 
-# ------------------------------------------------------------------
-# Convenience: Synthesize all tiers (not just Tier 2)
-# ------------------------------------------------------------------
-
-def synthesize_all_claims(
-    claims: List[ClaimOutput],
-    prior_claims: Optional[List[ClaimOutput]] = None,
-) -> Tier2Synthesis:
-    """
-    Run synthesis on all claims (can be used for full briefing analysis).
-    Same logic as synthesize_tier2 but named for clarity.
-    """
-    return synthesize_tier2(claims, prior_claims)
+# Keep backward compat alias
+synthesize_tier2 = synthesize_section2
 
 
 # ------------------------------------------------------------------
@@ -495,140 +525,91 @@ def synthesize_all_claims(
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("Tier 2 Synthesis Test")
+    print("Section 2 Synthesis Test")
     print("=" * 60)
 
-    # Test claims with intentional agreement/disagreement patterns
     test_claims = [
         # META: Agreement cluster (2 confirming)
         ClaimOutput(
-            chunk_id="c1",
-            doc_id="doc1",
+            chunk_id="c1", doc_id="doc1",
             bullets=["META ad revenue growth remains strong at 28% YoY"],
-            ticker="META",
-            claim_type="fact",
-            source_citation="Jefferies, p.1",
-            confidence_level="high",
-            time_sensitivity="ongoing",
+            ticker="META", claim_type="fact",
+            source_citation="Jefferies, Brent Thill, p.1",
+            confidence_level="high", time_sensitivity="ongoing",
             belief_pressure="confirms_consensus",
-            uncertainty_preserved=False,
+            uncertainty_preserved=False, category="tracked_ticker",
         ),
         ClaimOutput(
-            chunk_id="c2",
-            doc_id="doc1",
+            chunk_id="c2", doc_id="doc2",
             bullets=["META Reels monetization on track per management guidance"],
-            ticker="META",
-            claim_type="fact",
-            source_citation="Jefferies, p.2",
-            confidence_level="high",
-            time_sensitivity="ongoing",
+            ticker="META", claim_type="fact",
+            source_citation="Morgan Stanley, p.2",
+            confidence_level="high", time_sensitivity="ongoing",
             belief_pressure="confirms_consensus",
-            uncertainty_preserved=False,
+            uncertainty_preserved=False, category="tracked_ticker",
         ),
         # META: Disagreement (contrarian vs confirms)
         ClaimOutput(
-            chunk_id="c3",
-            doc_id="doc1",
+            chunk_id="c3", doc_id="doc3",
             bullets=["META AI capex returns may disappoint near-term"],
-            ticker="META",
-            claim_type="risk",
-            source_citation="Jefferies, p.3",
-            confidence_level="medium",
-            time_sensitivity="upcoming",
+            ticker="META", claim_type="risk",
+            source_citation="Substack, Independent Analyst, 2026-02-10",
+            confidence_level="medium", time_sensitivity="upcoming",
             belief_pressure="contradicts_consensus",
-            uncertainty_preserved=True,
+            uncertainty_preserved=True, category="tracked_ticker",
         ),
-        # GOOGL: Breaking news (delta)
+        # CRWD: Forecast vs Risk
         ClaimOutput(
-            chunk_id="c4",
-            doc_id="doc1",
-            bullets=["GOOGL Cloud revenue beat expectations by 5%"],
-            ticker="GOOGL",
-            claim_type="fact",
-            source_citation="Jefferies, p.4",
-            confidence_level="high",
-            time_sensitivity="breaking",
-            belief_pressure="contradicts_consensus",
-            uncertainty_preserved=False,
-        ),
-        # CRWD: Forecast vs Risk disagreement
-        ClaimOutput(
-            chunk_id="c5",
-            doc_id="doc1",
+            chunk_id="c5", doc_id="doc4",
             bullets=["CRWD expected to beat Q4 estimates on strong pipeline"],
-            ticker="CRWD",
-            claim_type="forecast",
-            source_citation="Jefferies, p.5",
-            confidence_level="medium",
-            time_sensitivity="upcoming",
+            ticker="CRWD", claim_type="forecast",
+            source_citation="Jefferies, Joseph Gallo, p.5",
+            confidence_level="medium", time_sensitivity="upcoming",
             belief_pressure="confirms_consensus",
-            uncertainty_preserved=False,
+            uncertainty_preserved=False, category="tracked_ticker",
         ),
         ClaimOutput(
-            chunk_id="c6",
-            doc_id="doc1",
+            chunk_id="c6", doc_id="doc5",
             bullets=["CRWD faces competitive pressure from MSFT Defender"],
-            ticker="CRWD",
-            claim_type="risk",
-            source_citation="Jefferies, p.6",
-            confidence_level="medium",
-            time_sensitivity="ongoing",
+            ticker="CRWD", claim_type="risk",
+            source_citation="Morgan Stanley, p.6",
+            confidence_level="medium", time_sensitivity="ongoing",
             belief_pressure="contradicts_prior_assumptions",
-            uncertainty_preserved=False,
+            uncertainty_preserved=False, category="tracked_ticker",
         ),
     ]
 
     print(f"\nInput: {len(test_claims)} claims")
-    print("Expected: META agreement + disagreement, GOOGL delta, CRWD outlook disagreement\n")
+    print("Expected: META agreement + disagreement, CRWD outlook disagreement\n")
 
-    # Run synthesis
-    synthesis = synthesize_tier2(test_claims)
+    synthesis = synthesize_section2(test_claims)
 
     print("-" * 60)
-    print("Synthesis Output:")
+    print("Section 2 Narrative:")
     print("-" * 60)
-    print(synthesis.format_markdown())
+    print(synthesis.narrative)
 
-    # Verification
-    print("=" * 60)
+    print("\n" + "=" * 60)
     print("Verification")
     print("=" * 60)
 
-    # Should have agreements
     assert len(synthesis.agreements) >= 1, "Should detect META agreement"
-    meta_agreement = [a for a in synthesis.agreements if 'META' in a.topic]
-    assert len(meta_agreement) >= 1, "META claims should show agreement"
+    meta_ag = [a for a in synthesis.agreements if 'META' in a.topic]
+    assert len(meta_ag) >= 1, "META claims should show agreement"
     print("✓ Agreement detection working")
 
-    # Should have disagreements
     assert len(synthesis.disagreements) >= 1, "Should detect disagreements"
     print(f"✓ Found {len(synthesis.disagreements)} disagreement clusters")
 
-    # Should have deltas (breaking news)
-    assert len(synthesis.deltas) >= 1, "Should detect breaking news as delta"
-    googl_delta = [d for d in synthesis.deltas if 'GOOGL' in d.description]
-    assert len(googl_delta) >= 1, "GOOGL breaking news should be a delta"
-    print("✓ Delta detection working")
+    assert synthesis.narrative, "Should have narrative content"
+    print("✓ Narrative generated")
 
-    # All claim IDs should be cited
-    all_cited_ids = set()
-    for ag in synthesis.agreements:
-        all_cited_ids.update(ag.claim_ids)
-    for dg in synthesis.disagreements:
-        all_cited_ids.update(dg.side_a_ids)
-        all_cited_ids.update(dg.side_b_ids)
-    for delta in synthesis.deltas:
-        all_cited_ids.add(delta.claim_id)
-
-    print(f"✓ Claims cited: {sorted(all_cited_ids)}")
-
-    # No thesis language check (manual)
-    md = synthesis.format_markdown()
+    # No thesis language
     thesis_words = ['recommend', 'should', 'must', 'bullish', 'bearish', 'buy', 'sell']
-    has_thesis = any(w in md.lower() for w in thesis_words)
+    has_thesis = any(w in synthesis.narrative.lower() for w in thesis_words)
     if has_thesis:
-        print("⚠ Warning: Thesis language detected in output")
+        print("⚠ Warning: Thesis language detected in narrative")
     else:
         print("✓ No thesis/recommendation language")
 
-    print("\nSynthesis validated. Structure without conclusions.")
+    print("\n✓ Section 2 synthesis validated")

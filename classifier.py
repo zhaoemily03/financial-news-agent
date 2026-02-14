@@ -1,15 +1,14 @@
 """
-Lightweight chunk classification — describe, don't decide.
-Uses GPT-3.5-turbo for cheap, JSON-only output.
-No summarization. No relevance scoring.
+Chunk classifier — route each chunk into one of four categories.
 
-Classification fields:
-- topic: TMT-aware taxonomy
-- asset_exposure: tickers mentioned
-- content_type: fact | interpretation | forecast | risk
-- time_horizon: near_term | medium_term | long_term | unspecified
-- polarity: positive | negative | neutral | mixed
-- novelty: new | incremental | rehash
+Uses a cheap LLM (GPT-3.5-turbo) for JSON-only output.
+No summarization. No relevance scoring. Just categorize and tag.
+
+Categories:
+- tracked_ticker: Chunk is about a specific tracked ticker → tag with ticker(s)
+- tmt_sector: Chunk is about TMT sector-level information → tag with sub-topic
+- macro: Chunk has macro-relevant indicators (economic, geopolitical)
+- irrelevant: Chunk is off-scope → discard from briefing and historical filing
 
 Usage:
     from classifier import classify_chunk, classify_chunks
@@ -21,7 +20,7 @@ Usage:
 
 import json
 import os
-from typing import List, Dict, Optional
+from typing import List, Optional
 from dataclasses import dataclass, field, asdict
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -29,62 +28,42 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from schemas import Chunk, Document
+import config
 
 # ------------------------------------------------------------------
-# TMT Topic Taxonomy
+# Category and sub-topic definitions
 # ------------------------------------------------------------------
 
-TMT_TOPICS = {
-    'technology': [
-        'ai_ml',           # AI, machine learning, LLMs, generative AI
-        'cloud',           # Cloud computing, IaaS, PaaS
-        'software',        # Enterprise software, SaaS, applications
-        'infrastructure',  # Data centers, servers, networking
-        'semiconductors',  # Chips, processors, GPU
-        'hardware',        # Devices, consumer electronics
-    ],
-    'media': [
-        'advertising',     # Digital ads, ad tech, programmatic
-        'content',         # Streaming, video, music, publishing
-        'gaming',          # Video games, esports, virtual worlds
-        'social',          # Social networks, messaging, community
-    ],
-    'telecom': [
-        'networks',        # 5G, wireless, broadband
-        'telecom_infra',   # Towers, fiber, spectrum
-    ],
-    'other': [
-        'ecommerce',       # Online retail, marketplaces
-        'fintech',         # Payments, digital finance
-        'cybersecurity',   # Security software, threat protection
-        'general',         # Doesn't fit specific category
-    ],
-}
+CATEGORIES = ['tracked_ticker', 'tmt_sector', 'macro', 'irrelevant']
 
-# Flat list for validation
-ALL_TOPICS = [t for cats in TMT_TOPICS.values() for t in cats]
+TMT_SUBTOPICS = [
+    'cloud_enterprise_software',      # Cloud computing, SaaS, enterprise apps
+    'internet_digital_advertising',    # Digital ads, ad tech, social platforms
+    'semiconductors_hardware',         # Chips, processors, GPU, data centers, devices
+    'telecom_infrastructure',          # 5G, wireless, broadband, towers, fiber
+    'consumer_internet_media',         # Streaming, gaming, e-commerce, consumer apps
+]
+
+CONTENT_TYPES = ['fact', 'interpretation', 'forecast', 'risk']
+POLARITIES = ['positive', 'negative', 'neutral', 'mixed']
+
+# Build ticker list string for the prompt
+_TICKER_LIST = ', '.join(sorted(set(config.ALL_TICKERS)))
+
 
 # ------------------------------------------------------------------
 # Classification Schema
 # ------------------------------------------------------------------
 
-CONTENT_TYPES = ['fact', 'interpretation', 'forecast', 'risk']
-TIME_HORIZONS = ['near_term', 'medium_term', 'long_term', 'unspecified']
-POLARITIES = ['positive', 'negative', 'neutral', 'mixed']
-NOVELTY_LEVELS = ['new', 'incremental', 'rehash']
-
-
 @dataclass
 class ChunkClassification:
     """Classification metadata for a chunk."""
     chunk_id: str = ""
-    topic: str = "general"                    # from TMT_TOPICS
-    topic_secondary: Optional[str] = None     # optional second topic
-    asset_exposure: List[str] = field(default_factory=list)  # tickers mentioned
-    content_type: str = "fact"                # fact|interpretation|forecast|risk
-    time_horizon: str = "unspecified"         # near_term|medium_term|long_term|unspecified
-    polarity: str = "neutral"                 # positive|negative|neutral|mixed
-    novelty: str = "incremental"              # new|incremental|rehash
+    category: str = "irrelevant"              # tracked_ticker | tmt_sector | macro | irrelevant
+    tickers: List[str] = field(default_factory=list)  # specific tickers (for tracked_ticker)
+    tmt_subtopic: Optional[str] = None        # sub-topic (for tmt_sector)
+    content_type: str = "fact"                # fact | interpretation | forecast | risk
+    polarity: str = "neutral"                 # positive | negative | neutral | mixed
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -99,37 +78,40 @@ class ChunkClassification:
 # Classification Prompt
 # ------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are a financial document classifier. Classify the given text chunk.
+SYSTEM_PROMPT = f"""You are a financial document classifier. Classify the given text chunk into exactly one category.
 
 Output ONLY valid JSON with these fields:
-- topic: primary topic (one of: ai_ml, cloud, software, infrastructure, semiconductors, hardware, advertising, content, gaming, social, networks, telecom_infra, ecommerce, fintech, cybersecurity, general)
-- topic_secondary: optional second topic if chunk spans two areas, else null
-- asset_exposure: array of stock tickers mentioned (e.g., ["META", "GOOGL"]), empty if none
+
+- category: one of (tracked_ticker, tmt_sector, macro, irrelevant)
+  - tracked_ticker: Chunk discusses a specific stock being tracked. Tracked tickers: {_TICKER_LIST}
+  - tmt_sector: Chunk discusses TMT sector-level trends, themes, or developments not tied to a single tracked ticker
+  - macro: Chunk discusses macroeconomic or geopolitical factors (e.g. interest rates, unemployment, tariffs, trade policy, consumer confidence, elections, GDP, inflation)
+  - irrelevant: Chunk is about non-TMT sectors, boilerplate disclosures, or has no actionable content
+
+- tickers: array of tracked stock tickers discussed (e.g. ["META", "GOOGL"]). Only include tickers from the tracked list above. Empty array if none.
+
+- tmt_subtopic: if category is tmt_sector, one of (cloud_enterprise_software, internet_digital_advertising, semiconductors_hardware, telecom_infrastructure, consumer_internet_media). null otherwise.
+  - cloud_enterprise_software: Cloud computing, SaaS, enterprise apps, developer tools
+  - internet_digital_advertising: Digital ads, ad tech, social media platforms, programmatic
+  - semiconductors_hardware: Chips, processors, GPU, data centers, devices
+  - telecom_infrastructure: 5G, wireless, broadband, towers, fiber, spectrum
+  - consumer_internet_media: Streaming, gaming, e-commerce, consumer apps, content
+
 - content_type: one of (fact, interpretation, forecast, risk)
   - fact: verifiable data points, metrics, historical events
   - interpretation: analyst opinions, assessments, explanations
   - forecast: predictions about future performance
   - risk: potential negative factors, concerns, warnings
-- time_horizon: one of (near_term, medium_term, long_term, unspecified)
-  - near_term: <6 months or current quarter
-  - medium_term: 6-18 months
-  - long_term: >18 months
-  - unspecified: no clear timeframe
+
 - polarity: one of (positive, negative, neutral, mixed)
-  - positive: bullish, upbeat, favorable
-  - negative: bearish, concerning, unfavorable
-  - neutral: balanced, factual without sentiment
-  - mixed: contains both positive and negative elements
-- novelty: one of (new, incremental, rehash)
-  - new: introduces fresh information, thesis, or perspective
-  - incremental: updates or extends known information
-  - rehash: restates widely known information
 
 Rules:
 1. Output ONLY the JSON object, no markdown, no explanation
-2. Do not summarize or interpret beyond classification
-3. Extract actual tickers mentioned, don't infer related companies
-4. Be conservative: when uncertain, use neutral/unspecified/general"""
+2. A chunk about a tracked ticker should be tracked_ticker even if it also has sector implications
+3. Extract actual tickers mentioned — only tag tickers from the tracked list
+4. Boilerplate (disclosures, disclaimers, page headers/footers) → irrelevant
+5. Non-TMT sectors (healthcare, energy, industrials, etc.) → irrelevant
+6. When uncertain, prefer irrelevant over forcing a category"""
 
 
 def _build_user_prompt(chunk: Chunk, doc: Optional[Document] = None) -> str:
@@ -144,7 +126,6 @@ def _build_user_prompt(chunk: Chunk, doc: Optional[Document] = None) -> str:
             parts.append(f"Date: {doc.date_published}")
         parts.append("")
 
-    # Include section context from chunk metadata
     if chunk.metadata:
         section = chunk.metadata.get('section')
         seg_type = chunk.metadata.get('segment_type')
@@ -169,17 +150,7 @@ def classify_chunk(
     doc: Optional[Document] = None,
     client: Optional[OpenAI] = None,
 ) -> ChunkClassification:
-    """
-    Classify a single chunk using GPT-3.5-turbo.
-
-    Args:
-        chunk: Chunk to classify
-        doc: Optional parent Document for context
-        client: Optional OpenAI client (creates one if not provided)
-
-    Returns:
-        ChunkClassification with all fields populated
-    """
+    """Classify a single chunk using GPT-3.5-turbo."""
     if client is None:
         client = OpenAI()
 
@@ -189,7 +160,7 @@ def classify_chunk(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": _build_user_prompt(chunk, doc)},
         ],
-        temperature=0,  # deterministic
+        temperature=0,
         max_tokens=200,
         response_format={"type": "json_object"},
     )
@@ -198,22 +169,46 @@ def classify_chunk(
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        # Fallback to defaults on parse failure
         data = {}
 
-    # Validate and normalize
-    classification = ChunkClassification(
-        chunk_id=chunk.chunk_id,
-        topic=data.get('topic', 'general') if data.get('topic') in ALL_TOPICS else 'general',
-        topic_secondary=data.get('topic_secondary') if data.get('topic_secondary') in ALL_TOPICS else None,
-        asset_exposure=data.get('asset_exposure', []) if isinstance(data.get('asset_exposure'), list) else [],
-        content_type=data.get('content_type', 'fact') if data.get('content_type') in CONTENT_TYPES else 'fact',
-        time_horizon=data.get('time_horizon', 'unspecified') if data.get('time_horizon') in TIME_HORIZONS else 'unspecified',
-        polarity=data.get('polarity', 'neutral') if data.get('polarity') in POLARITIES else 'neutral',
-        novelty=data.get('novelty', 'incremental') if data.get('novelty') in NOVELTY_LEVELS else 'incremental',
-    )
+    # Validate category
+    category = data.get('category', 'irrelevant')
+    if category not in CATEGORIES:
+        category = 'irrelevant'
 
-    return classification
+    # Validate tickers — only keep tracked ones
+    raw_tickers = data.get('tickers', [])
+    tickers = [t for t in raw_tickers if t in config.ALL_TICKERS] if isinstance(raw_tickers, list) else []
+
+    # If tickers found but category wasn't tracked_ticker, fix it
+    if tickers and category != 'tracked_ticker':
+        category = 'tracked_ticker'
+
+    # Validate tmt_subtopic
+    tmt_subtopic = data.get('tmt_subtopic')
+    if category == 'tmt_sector':
+        if tmt_subtopic not in TMT_SUBTOPICS:
+            tmt_subtopic = 'consumer_internet_media'  # safe default for TMT
+    else:
+        tmt_subtopic = None
+
+    # Validate content_type and polarity
+    content_type = data.get('content_type', 'fact')
+    if content_type not in CONTENT_TYPES:
+        content_type = 'fact'
+
+    polarity = data.get('polarity', 'neutral')
+    if polarity not in POLARITIES:
+        polarity = 'neutral'
+
+    return ChunkClassification(
+        chunk_id=chunk.chunk_id,
+        category=category,
+        tickers=tickers,
+        tmt_subtopic=tmt_subtopic,
+        content_type=content_type,
+        polarity=polarity,
+    )
 
 
 def classify_chunks(
@@ -221,17 +216,7 @@ def classify_chunks(
     doc: Optional[Document] = None,
     client: Optional[OpenAI] = None,
 ) -> List[ChunkClassification]:
-    """
-    Classify multiple chunks sequentially.
-
-    Args:
-        chunks: List of Chunks to classify
-        doc: Optional parent Document for context
-        client: Optional OpenAI client (reused across calls)
-
-    Returns:
-        List of ChunkClassification objects, same order as input
-    """
+    """Classify multiple chunks sequentially."""
     if client is None:
         client = OpenAI()
 
@@ -249,11 +234,7 @@ def apply_classifications(
     chunks: List[Chunk],
     classifications: List[ChunkClassification],
 ) -> List[Chunk]:
-    """
-    Apply classifications to chunk metadata.
-
-    Modifies chunks in place and returns them for chaining.
-    """
+    """Apply classifications to chunk metadata. Modifies in place."""
     for chunk, clf in zip(chunks, classifications):
         if chunk.metadata is None:
             chunk.metadata = {}
@@ -261,13 +242,35 @@ def apply_classifications(
     return chunks
 
 
+def filter_irrelevant(
+    chunks: List[Chunk],
+    classifications: List[ChunkClassification],
+) -> tuple:
+    """
+    Separate relevant from irrelevant chunks.
+
+    Returns:
+        (relevant_chunks, relevant_classifications, discarded_count)
+    """
+    relevant_chunks = []
+    relevant_clfs = []
+    discarded = 0
+
+    for chunk, clf in zip(chunks, classifications):
+        if clf.category == 'irrelevant':
+            discarded += 1
+        else:
+            relevant_chunks.append(chunk)
+            relevant_clfs.append(clf)
+
+    return relevant_chunks, relevant_clfs, discarded
+
+
 # ------------------------------------------------------------------
 # Entry point for testing
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Test with sample chunks (no API call in dry-run mode)
-
     sample_chunks = [
         Chunk(
             chunk_id="test-1",
@@ -288,19 +291,30 @@ is tracking ahead of consensus with Reels monetization inflecting.""",
             chunk_id="test-2",
             doc_id="doc-1",
             chunk_index=1,
-            text="""Key Takeaways
-- Ad revenue grew 28% YoY driven by improved Reels engagement
-- AI-driven ad targeting improvements yielded 15% better ROAS
-- Reality Labs losses narrowing faster than expected
-- Threads MAU surpassed 300M, creating new ad inventory""",
+            text="""Cloud infrastructure spending accelerated across all major hyperscalers
+in Q4, with combined capex up 35% YoY. AWS, Azure, and GCP all reported
+above-consensus growth, suggesting enterprise cloud migration is
+re-accelerating after a digestion period.""",
             page_start=1,
             page_end=1,
-            metadata={'section': 'Key Takeaways', 'segment_type': 'bullet'},
+            metadata={'section': 'Industry Trends', 'segment_type': 'paragraph'},
         ),
         Chunk(
             chunk_id="test-3",
             doc_id="doc-1",
             chunk_index=2,
+            text="""The Federal Reserve held interest rates steady at 5.25-5.50% citing
+persistent inflation concerns. New tariffs on Chinese semiconductor
+imports could raise costs for US hardware OEMs. Consumer confidence
+index fell to 98.7, the lowest since March 2024.""",
+            page_start=2,
+            page_end=2,
+            metadata={'section': 'Macro Environment', 'segment_type': 'paragraph'},
+        ),
+        Chunk(
+            chunk_id="test-4",
+            doc_id="doc-1",
+            chunk_index=3,
             text="""RISK FACTORS
 Key risks include regulatory headwinds in the EU, potential TikTok
 resurgence, and slower-than-expected AI capex returns. Additionally,
@@ -309,6 +323,18 @@ META has largely adapted its systems.""",
             page_start=2,
             page_end=2,
             metadata={'section': 'RISK FACTORS', 'segment_type': 'paragraph'},
+        ),
+        Chunk(
+            chunk_id="test-5",
+            doc_id="doc-1",
+            chunk_index=4,
+            text="""DISCLOSURES
+Jefferies LLC is a registered broker-dealer. This research report
+is for informational purposes only. Past performance is not indicative
+of future results.""",
+            page_start=3,
+            page_end=3,
+            metadata={'section': 'DISCLOSURES', 'segment_type': 'paragraph'},
         ),
     ]
 
@@ -321,24 +347,28 @@ META has largely adapted its systems.""",
     )
 
     print("=" * 60)
-    print("Chunk Classification Test")
+    print("Chunk Classification Test (4-Category System)")
     print("=" * 60)
 
-    # Check if we have API key
     if os.getenv('OPENAI_API_KEY'):
         print("\nRunning live classification with GPT-3.5-turbo...\n")
 
         classifications = classify_chunks(sample_chunks, sample_doc)
 
         for chunk, clf in zip(sample_chunks, classifications):
-            print(f"\n[Chunk {chunk.chunk_index}] {chunk.metadata.get('section', '—')}")
-            print(f"  Topic: {clf.topic}" + (f" / {clf.topic_secondary}" if clf.topic_secondary else ""))
-            print(f"  Assets: {clf.asset_exposure}")
-            print(f"  Type: {clf.content_type} | Horizon: {clf.time_horizon}")
-            print(f"  Polarity: {clf.polarity} | Novelty: {clf.novelty}")
+            section = chunk.metadata.get('section', '—')
+            print(f"\n[Chunk {chunk.chunk_index}] {section}")
+            print(f"  Category: {clf.category}")
+            if clf.tickers:
+                print(f"  Tickers: {clf.tickers}")
+            if clf.tmt_subtopic:
+                print(f"  TMT Sub-topic: {clf.tmt_subtopic}")
+            print(f"  Content: {clf.content_type} | Polarity: {clf.polarity}")
 
-        # Apply to chunks and verify
+        # Apply and filter
         apply_classifications(sample_chunks, classifications)
+        relevant, relevant_clfs, discarded = filter_irrelevant(sample_chunks, classifications)
+
         print("\n" + "=" * 60)
         print("Verification")
         print("=" * 60)
@@ -346,34 +376,67 @@ META has largely adapted its systems.""",
         assert all('classification' in c.metadata for c in sample_chunks)
         print("✓ Classifications applied to chunk metadata")
 
-        assert all(clf.chunk_id == chunk.chunk_id for clf, chunk in zip(classifications, sample_chunks))
-        print("✓ Chunk IDs match")
+        # Check: META chunk should be tracked_ticker with META in tickers
+        assert classifications[0].category == 'tracked_ticker'
+        assert 'META' in classifications[0].tickers
+        print("✓ META chunk → tracked_ticker with ticker tag")
 
-        # Check expected classifications
-        assert classifications[0].topic in ['advertising', 'social', 'ai_ml']
-        assert 'META' in classifications[0].asset_exposure
-        print("✓ Topic and asset detection working")
+        # Check: Cloud trends should be tmt_sector
+        assert classifications[1].category == 'tmt_sector'
+        assert classifications[1].tmt_subtopic in TMT_SUBTOPICS
+        print(f"✓ Cloud chunk → tmt_sector / {classifications[1].tmt_subtopic}")
 
-        assert classifications[2].content_type == 'risk'
-        print("✓ Risk content type detected correctly")
+        # Check: Fed/tariffs chunk should be macro
+        assert classifications[2].category == 'macro'
+        print("✓ Fed/tariffs chunk → macro")
+
+        # Check: Disclosures should be irrelevant
+        assert classifications[4].category == 'irrelevant'
+        print("✓ Disclosures → irrelevant")
+
+        # Check: filter_irrelevant works
+        assert discarded >= 1
+        print(f"✓ Filtered out {discarded} irrelevant chunk(s), {len(relevant)} remaining")
 
     else:
         print("\nNo OPENAI_API_KEY found. Showing sample output structure:\n")
 
-        sample_clf = ChunkClassification(
-            chunk_id="test-1",
-            topic="advertising",
-            topic_secondary="ai_ml",
-            asset_exposure=["META"],
-            content_type="forecast",
-            time_horizon="medium_term",
-            polarity="positive",
-            novelty="new",
-        )
+        samples = [
+            ChunkClassification(
+                chunk_id="test-1",
+                category="tracked_ticker",
+                tickers=["META"],
+                content_type="forecast",
+                polarity="positive",
+            ),
+            ChunkClassification(
+                chunk_id="test-2",
+                category="tmt_sector",
+                tmt_subtopic="cloud_enterprise_software",
+                content_type="fact",
+                polarity="positive",
+            ),
+            ChunkClassification(
+                chunk_id="test-3",
+                category="macro",
+                content_type="fact",
+                polarity="negative",
+            ),
+            ChunkClassification(
+                chunk_id="test-5",
+                category="irrelevant",
+                content_type="fact",
+                polarity="neutral",
+            ),
+        ]
 
-        print("Sample classification output:")
-        print(json.dumps(sample_clf.to_dict(), indent=2))
+        for s in samples:
+            print(json.dumps(s.to_dict(), indent=2))
+            print()
 
-        print("\nTMT Topic Taxonomy:")
-        for category, topics in TMT_TOPICS.items():
-            print(f"  {category}: {', '.join(topics)}")
+        print("TMT Sub-topics:")
+        for st in TMT_SUBTOPICS:
+            print(f"  - {st}")
+
+        print(f"\nTracked tickers ({len(config.ALL_TICKERS)}):")
+        print(f"  {_TICKER_LIST}")

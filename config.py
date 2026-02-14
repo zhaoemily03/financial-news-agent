@@ -80,7 +80,7 @@ EMAIL_CONFIG = {
 SOURCES = {
     # Sell-side research portals (use PortalRegistry)
     'jefferies': {
-        'enabled': True,
+        'enabled': False,  # Temporarily disabled — 0 notifications + hangs pipeline
         'portal_url': 'https://content.jefferies.com',
         'login_required': True,
         'uses_followed_notifications': True,
@@ -92,7 +92,7 @@ SOURCES = {
         'portal_url': 'https://ny.matrix.ms.com/eqr/research/ui/#/home',
         'login_required': True,
         'uses_followed_notifications': True,
-        'max_reports': 25,  # Collect more to capture thematic content
+        'max_reports': 25,  # Should I allow it to intake more, like 50+?
         'scraper_class': 'MorganStanleyScraper',
     },
     'goldman': {
@@ -161,6 +161,13 @@ SOURCES = {
                 'rss_url': 'https://feeds.transistor.fm/acquired',
                 'max_episodes': 1,  # Long episodes, limit to 1
             },
+            'a16z': {
+                'enabled': True,
+                'name': 'a16z',
+                'type': 'youtube',
+                'channel_id': 'UC9cn0TuPq4dnbTY-CBsm8XA',
+                'max_episodes': 2,
+            },
         },
     }
 }
@@ -181,4 +188,47 @@ STORAGE = {
     'processed_content_db': 'data/processed_content.db',
     'reports_directory': 'data/reports',
     'logs_directory': 'logs'
+}
+
+# ------------------------------------------------------------------
+# Macro News Collection (RSS)
+# ------------------------------------------------------------------
+# Fetches macro headlines from financial news RSS feeds.
+# Claims get event_type='macro' and flow to Section 3 of briefing.
+
+MACRO_NEWS = {
+    'enabled': True,
+    'max_articles': 6,              # Max macro articles per run
+    'days_lookback': 1,             # Only today's articles
+    'keyword_filter': True,         # Filter by macro keywords
+}
+
+# ------------------------------------------------------------------
+# Macro-Micro Connection Synthesis (DEPRECATED)
+# ------------------------------------------------------------------
+# Disabled in favor of sentiment drift detection.
+# Keeping config for backward compatibility but not used.
+
+CONNECTION_SYNTHESIS = {
+    'enabled': False,  # Disabled - use DRIFT_DETECTION instead
+    'max_connections': 10,
+    'min_pitch_prompts': 3,
+    'max_pitch_prompts': 5,
+    'historical_days': 30,
+    'include_watchlist': True,
+    'require_clear_counter': True,
+}
+
+# ------------------------------------------------------------------
+# Sentiment Drift Detection
+# ------------------------------------------------------------------
+# Surfaces belief changes and confidence shifts over time.
+# This is the core value proposition: detect when sentiment is moving.
+
+DRIFT_DETECTION = {
+    'enabled': True,
+    'lookback_days': 30,            # How far back to compare
+    'min_claims_for_drift': 2,      # Minimum claims on same topic to detect drift
+    'confidence_shift_threshold': 1, # Levels of confidence change to flag (low→high = 2)
+    'track_by': ['ticker', 'author', 'source'],  # Dimensions to track
 }

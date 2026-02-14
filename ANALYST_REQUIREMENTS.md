@@ -20,6 +20,7 @@ This document tracks all information needed from analysts to configure the finan
   - [ ] Report access methods
 
 ### Substack Subscriptions
+# working on Joey forwarding from his inbox to my email
 - [ ] **List of Substack authors to monitor**
   - [ ] Author name and Substack URL for each
   - [ ] Which ones have email/RSS feeds enabled
@@ -27,18 +28,18 @@ This document tracks all information needed from analysts to configure the finan
   - [ ] Login credentials for paid subscriptions
 
 ### Other Content Sources (Future)
-- [ ] YouTube channels to monitor
+- [X] YouTube channels to monitor
 - [ ] Twitter/X accounts to follow
-- [ ] Podcast feeds
+- [X] Podcast feeds
 
 ---
 
 ## 2. Coverage & Themes Configuration
 
 ### Stock Coverage
-- [ ] **List of tickers currently covered**
-  - [ ] Primary tickers (high priority)
-  - [ ] Secondary tickers (monitor but lower priority)
+- [X] **List of tickers currently covered**
+  - [X] Primary tickers (high priority)
+  - [X] Secondary tickers (monitor but lower priority)
   - [ ] Any ticker aliases or related symbols (e.g., ADRs, different exchanges)
 
 ### Investment Theses/Themes
@@ -168,9 +169,10 @@ This document tracks all information needed from analysts to configure the finan
 ## 7. Content Filtering & Relevance
 
 ### Relevance Criteria
-- [ ] **What makes content "relevant"?**
-  - [ ] Mentions ticker explicitly?
-  - [ ] Mentions theme keywords?
+- [X] **What makes content "relevant"?**
+  - [X] Mentions ticker explicitly?
+  - [X] Mentions theme keywords?
+  - [X] Macro coverage explicitly connected to TMT sector from Reuters and CNBC
   - [ ] From specific analysts/authors?
   - [ ] Minimum content length?
 
@@ -185,9 +187,9 @@ This document tracks all information needed from analysts to configure the finan
 ## 8. Technical Environment
 
 ### Deployment
-- [ ] **Where will this run?**
+- [X] **Where will this run?**
   - [ ] Analyst's local machine (laptop/desktop)?
-  - [ ] Shared server?
+  - [X] Shared server?
   - [ ] Cloud VM?
   - [ ] Does machine stay on 24/7?
 
