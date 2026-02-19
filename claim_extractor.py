@@ -83,6 +83,9 @@ class ClaimOutput:
     sector_implication: Optional[str] = None # For macro claims: one-sentence TMT linkage
     section_id: Optional[int] = None        # assigned during briefing routing
 
+    # Source context — original analyst prose preserved for synthesis quality
+    source_text: Optional[str] = None       # Raw chunk text (for Section 2 synthesis context)
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -365,6 +368,7 @@ def extract_claim(
         is_descriptive_event=is_descriptive_event,
         has_belief_delta=has_belief_delta,
         sector_implication=sector_implication,
+        source_text=chunk.text.strip(),
     )
 
 
@@ -400,10 +404,10 @@ def extract_claims(
 
 
 # ------------------------------------------------------------------
-# Per-group claim cap (max 3 per ticker/subtopic/macro)
+# Per-group claim sorting (breaking + contrarian first, no cap)
 # ------------------------------------------------------------------
 
-# Priority ordering for selecting the most important claims
+# Priority ordering: most signal-dense claims surface first
 _TIME_PRIORITY = {'breaking': 0, 'upcoming': 1, 'ongoing': 2}
 _BELIEF_PRIORITY = {
     'contradicts_consensus': 0,
@@ -411,8 +415,6 @@ _BELIEF_PRIORITY = {
     'unclear': 2,
     'confirms_consensus': 3,
 }
-
-MAX_CLAIMS_PER_GROUP = 3
 
 
 def _claim_sort_key(claim: ClaimOutput) -> tuple:
@@ -423,18 +425,18 @@ def _claim_sort_key(claim: ClaimOutput) -> tuple:
     )
 
 
-def cap_claims_per_group(claims: List[ClaimOutput]) -> List[ClaimOutput]:
+def sort_claims_by_priority(claims: List[ClaimOutput]) -> List[ClaimOutput]:
     """
-    Keep at most MAX_CLAIMS_PER_GROUP per routing group.
+    Sort claims within each routing group by priority — no cap applied.
 
     Groups:
     - tracked_ticker claims: grouped by ticker
     - tmt_sector claims: grouped by tmt_subtopic
     - macro claims: one group
-    - Other categories pass through uncapped
 
-    Within each group, keeps the most important claims first
-    (breaking > upcoming > ongoing, contrarian > confirming).
+    Within each group: breaking > upcoming > ongoing, contrarian > confirming.
+    All relevant claims are kept; redundancy is prevented upstream by the
+    claim extractor's atomic-claim prompt.
     """
     from collections import defaultdict
 
@@ -443,23 +445,20 @@ def cap_claims_per_group(claims: List[ClaimOutput]) -> List[ClaimOutput]:
         if claim.category == 'tracked_ticker' and claim.ticker:
             groups[('ticker', claim.ticker)].append(claim)
         elif claim.category == 'tmt_sector':
-            key = claim.event_type or 'general'  # fallback if no subtopic context
+            key = claim.event_type or 'general'
             groups[('tmt', key)].append(claim)
         elif claim.category == 'macro':
             groups[('macro', 'macro')].append(claim)
         else:
             groups[('other', 'other')].append(claim)
 
-    capped = []
-    total_before = len(claims)
+    sorted_claims = []
     for key, group in groups.items():
         group.sort(key=_claim_sort_key)
-        capped.extend(group[:MAX_CLAIMS_PER_GROUP])
+        sorted_claims.extend(group)
 
-    dropped = total_before - len(capped)
-    if dropped:
-        print(f"  Capped claims: {total_before} → {len(capped)} (dropped {dropped} over-limit)")
-    return capped
+    print(f"  Sorted {len(sorted_claims)} claims by priority (no cap)")
+    return sorted_claims
 
 
 # ------------------------------------------------------------------

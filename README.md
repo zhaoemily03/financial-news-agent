@@ -109,10 +109,12 @@ The V3 briefing uses a **4-section purpose-driven layout**. Claims are routed by
 - **TMT sector**: Groups `tmt_sector` claims by event type.
 
 ### Section 2: Synthesis Across Sources
-- LLM-generated narrative prose (not bullets)
+- LLM-generated narrative prose (not bullets), up to 750 words
+- Each claim fed alongside the analyst's original prose excerpt — gives the LLM the reasoning chain, not just atomized bullets
 - Considers source credibility from `analyst_config_tmt.SOURCE_CREDIBILITY`
-- Surfaces where sources agree and disagree
+- Surfaces where sources agree and disagree, where they talk past each other
 - No thesis language — describes patterns, doesn't recommend
+- **⚑ Potential Implications subsection**: second-pass LLM call through a secondaries analyst lens — surfaces comp dynamics, liquidity timing, and information asymmetry signals. Explicitly flagged as model-generated interpretation.
 
 ### Section 3: Macro Connections (Phase 2)
 - Stub: shows count of macro claims filed. Full rendering coming later.
@@ -137,6 +139,7 @@ Every claim carries metadata to support human judgment:
 | `is_descriptive_event` | true / false | Did something concrete happen? |
 | `has_belief_delta` | true / false | Does this change prior expectations? |
 | `sector_implication` | text / null | TMT linkage (macro claims only) |
+| `source_text` | text / null | Original analyst prose from source chunk — preserved for synthesis context |
 
 These hooks let you quickly filter for:
 - Contrarian signals (`contradicts_*`)
@@ -398,7 +401,7 @@ NFLX, SPOT, U, APP, RBLX, ORCL, PLTR, SHOP
 - [x] V3 4-section briefing pipeline (Sections 1+2 live, 3+4 stubbed)
 - [x] 4-category classifier (tracked_ticker, tmt_sector, macro, irrelevant)
 - [x] Per-ticker claim cap (max 3 most important per group)
-- [x] Section 2 LLM narrative synthesis with source credibility
+- [x] Section 2 LLM narrative synthesis with source credibility, analyst prose context, and secondaries implications subsection
 - [x] Jefferies portal scraping (Selenium + SSO cookies)
 - [x] Morgan Stanley Matrix scraping (Selenium + email verification)
 - [x] PDF text extraction (pdfplumber + PyPDF2 fallback)

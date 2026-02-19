@@ -62,11 +62,12 @@ class DisagreementCluster:
 
 @dataclass
 class Section2Synthesis:
-    """Section 2 output: narrative + structured data."""
-    narrative: str = ""           # LLM-generated prose (2-3 paragraphs)
+    """Section 2 output: narrative + structured data + implications."""
+    narrative: str = ""           # LLM-generated prose
     agreements: List[AgreementCluster] = field(default_factory=list)
     disagreements: List[DisagreementCluster] = field(default_factory=list)
     no_disagreement: bool = False
+    implications: str = ""        # Model-generated secondaries implications (flagged non-objective)
 
     def has_content(self) -> bool:
         return bool(self.narrative or self.agreements or self.disagreements)
@@ -324,6 +325,8 @@ NARRATIVE_SYSTEM_PROMPT = """You are a hedge fund analyst reading across all mat
 
 Your job: Compare perspectives across sources — do NOT summarize sequentially.
 Weight conflicting views by source credibility scores provided.
+Use the analyst's original language (provided as context alongside each claim) to understand
+the reasoning chain, hedging, and conviction level — not just the atomized bullet.
 
 WHAT TO SURFACE:
 - Strong conviction — sources expressing high confidence or doubling down
@@ -331,6 +334,7 @@ WHAT TO SURFACE:
 - Hedging language — qualifiers that weaken prior positions
 - Explicit disagreement — sources taking opposite sides on the same topic
 - Emerging narratives — new themes appearing across multiple sources
+- Where analysts talk past each other — same topic, incompatible framing
 
 SENTIMENT DRIFT:
 - If a source's tone has shifted vs prior positioning, call it out
@@ -338,13 +342,41 @@ SENTIMENT DRIFT:
 - If nothing happened for a ticker, state "No Update"
 
 RULES:
-- Write in clear, direct prose (no bullet points, no headers)
+- Write in clear, connected prose (no bullet points, no headers)
+- Build arguments across paragraphs — each paragraph should flow into the next
 - Cite sources by name (e.g., "Jefferies notes...", "Morgan Stanley argues...")
 - Do NOT use thesis language: no "bullish", "bearish", "should", "recommend", "buy", "sell"
 - Do NOT add your own opinion or judgment
 - Do NOT repeat claims verbatim — synthesize across them
-- Keep total output under 200 words
+- Keep total output under 750 words
 - Write for a professional analyst who has already read Section 1"""
+
+
+IMPLICATIONS_SYSTEM_PROMPT = """You are a secondaries market analyst reviewing TMT research for implications
+relevant to private market secondaries transactions.
+
+Given today's synthesis of sell-side and independent research, surface implications for
+secondaries pricing, deal flow, and portfolio risk. Frame everything as observations and
+conditional logic — not conclusions, not recommendations.
+
+WHAT TO CONSIDER:
+- Valuation comp dynamics: How might growth visibility changes affect late-stage / pre-IPO
+  multiples for private names that use these public companies as pricing comps?
+- Liquidity event timing: Do any signals pull forward or push back expected IPO/M&A windows?
+- Sector allocation signals: Cross-portfolio signals (e.g., cloud spend, AI capex) that affect
+  how a secondaries portfolio might be weighted
+- Information asymmetry: Where public analysts disagree sharply, secondaries pricing may lag
+  the signal — call this out explicitly
+- GP selection: Divergence between high-credibility and low-credibility sources on the same
+  name creates selection risk for blind-pool secondaries buyers
+
+RULES:
+- Use conditional/observational language: "if X, then Y could follow" — not "X will happen"
+- Do NOT use thesis language: no "bullish", "bearish", "should", "recommend", "buy", "sell"
+- Do NOT repeat what was in the synthesis — go one level deeper into implications
+- Keep output under 250 words, 1-2 focused paragraphs
+- This output will be clearly flagged as model-generated interpretation; the analyst applies
+  their own judgment"""
 
 
 def _build_narrative_prompt(
@@ -372,7 +404,7 @@ def _build_narrative_prompt(
         parts.extend(cred_lines)
         parts.append("")
 
-    # ALL claims — primary input for the LLM to read across
+    # ALL claims — include analyst's original prose so LLM has the reasoning chain
     parts.append("TODAY'S CLAIMS (read all, find your own connections):")
     for c in claims:
         source = c.source_citation.split(',')[0].strip() if c.source_citation else 'Unknown'
@@ -380,6 +412,12 @@ def _build_narrative_prompt(
         conf = c.confidence_level
         pressure = c.belief_pressure
         parts.append(f"- {ticker_tag} {c.bullets[0]} ({source}, confidence={conf}, pressure={pressure})")
+        if c.source_text:
+            # Truncate to 250 chars — enough for reasoning chain without bloating the prompt
+            excerpt = c.source_text[:250].replace('\n', ' ').strip()
+            if len(c.source_text) > 250:
+                excerpt += "..."
+            parts.append(f"  [Analyst's words: \"{excerpt}\"]")
     parts.append("")
 
     # Deterministic hints — scaffolding, not constraints
@@ -438,7 +476,55 @@ def generate_section2_narrative(
             {"role": "user", "content": prompt},
         ],
         temperature=0.3,
-        max_tokens=500,
+        max_tokens=1000,  # ~750 words
+    )
+
+    return response.choices[0].message.content.strip()
+
+
+def generate_implications_narrative(
+    claims: List[ClaimOutput],
+    synthesis_narrative: str,
+    client: Optional[OpenAI] = None,
+) -> str:
+    """
+    Generate secondaries-relevant implications from today's claims.
+    Second-pass call with a different lens — goes one level deeper than the synthesis.
+
+    Returns: 1-2 paragraph markdown string, flagged as non-objective.
+    Returns "" if no API key (implications are bonus, not core).
+    """
+    if client is None:
+        if not os.getenv("OPENAI_API_KEY"):
+            return ""
+        client = OpenAI()
+
+    if not claims:
+        return ""
+
+    # Build a compact prompt: synthesis already seen + claims for context
+    lines = []
+    lines.append("TODAY'S SYNTHESIS (already written — do NOT repeat this, go deeper):")
+    lines.append(synthesis_narrative)
+    lines.append("")
+    lines.append("UNDERLYING CLAIMS (use for deeper implication analysis):")
+    for c in claims:
+        source = c.source_citation.split(',')[0].strip() if c.source_citation else 'Unknown'
+        ticker_tag = f"[{c.ticker}]" if c.ticker else "[Sector/Macro]"
+        lines.append(f"- {ticker_tag} {c.bullets[0]} ({source}, confidence={c.confidence_level}, pressure={c.belief_pressure})")
+    lines.append("")
+    lines.append("Write 1-2 paragraphs on secondaries-relevant implications. Conditional language only.")
+
+    prompt = '\n'.join(lines)
+
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": IMPLICATIONS_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.4,
+        max_tokens=400,  # ~250 words
     )
 
     return response.choices[0].message.content.strip()
@@ -507,11 +593,15 @@ def synthesize_section2(
         claims, agreements, disagreements, no_disagreement, client
     )
 
+    # Second-pass implications (secondaries lens, flagged non-objective)
+    implications = generate_implications_narrative(claims, narrative, client)
+
     return Section2Synthesis(
         narrative=narrative,
         agreements=agreements,
         disagreements=disagreements,
         no_disagreement=no_disagreement,
+        implications=implications,
     )
 
 
@@ -538,6 +628,7 @@ if __name__ == "__main__":
             confidence_level="high", time_sensitivity="ongoing",
             belief_pressure="confirms_consensus",
             uncertainty_preserved=False, category="tracked_ticker",
+            source_text="We continue to see robust ad revenue trajectory at META, with 28% YoY growth tracking ahead of our prior model. The Reels monetization ramp is inflecting and AI-driven targeting is showing measurable ROAS uplift.",
         ),
         ClaimOutput(
             chunk_id="c2", doc_id="doc2",
@@ -547,6 +638,7 @@ if __name__ == "__main__":
             confidence_level="high", time_sensitivity="ongoing",
             belief_pressure="confirms_consensus",
             uncertainty_preserved=False, category="tracked_ticker",
+            source_text="Management commentary was constructive on Reels. The team confirmed monetization is tracking in line with internal guidance, with international markets beginning to contribute meaningfully.",
         ),
         # META: Disagreement (contrarian vs confirms)
         ClaimOutput(
@@ -557,6 +649,7 @@ if __name__ == "__main__":
             confidence_level="medium", time_sensitivity="upcoming",
             belief_pressure="contradicts_consensus",
             uncertainty_preserved=True, category="tracked_ticker",
+            source_text="The sell-side appears to be underweighting the capex overhang. META's AI infrastructure spend is accelerating but the revenue payback timeline remains unclear. The market may be too sanguine on near-term ROI.",
         ),
         # CRWD: Forecast vs Risk
         ClaimOutput(
@@ -567,6 +660,7 @@ if __name__ == "__main__":
             confidence_level="medium", time_sensitivity="upcoming",
             belief_pressure="confirms_consensus",
             uncertainty_preserved=False, category="tracked_ticker",
+            source_text="Pipeline checks suggest a strong Q4 for CRWD. Channel partners are reporting healthy activity and deal sizes are holding up. We expect a beat on ARR and NRR metrics.",
         ),
         ClaimOutput(
             chunk_id="c6", doc_id="doc5",
@@ -576,6 +670,7 @@ if __name__ == "__main__":
             confidence_level="medium", time_sensitivity="ongoing",
             belief_pressure="contradicts_prior_assumptions",
             uncertainty_preserved=False, category="tracked_ticker",
+            source_text="Microsoft Defender is increasingly bundled into enterprise agreements, creating pricing friction for standalone endpoint security. We are seeing early displacement in SMB accounts that could migrate upmarket.",
         ),
     ]
 
@@ -588,6 +683,12 @@ if __name__ == "__main__":
     print("Section 2 Narrative:")
     print("-" * 60)
     print(synthesis.narrative)
+
+    if synthesis.implications:
+        print("\n" + "-" * 60)
+        print("⚑ Potential Implications:")
+        print("-" * 60)
+        print(synthesis.implications)
 
     print("\n" + "=" * 60)
     print("Verification")
@@ -604,11 +705,15 @@ if __name__ == "__main__":
     assert synthesis.narrative, "Should have narrative content"
     print("✓ Narrative generated")
 
-    # No thesis language
-    thesis_words = ['recommend', 'should', 'must', 'bullish', 'bearish', 'buy', 'sell']
-    has_thesis = any(w in synthesis.narrative.lower() for w in thesis_words)
+    assert hasattr(synthesis, 'implications'), "Should have implications field"
+    print(f"✓ Implications field present ({'populated' if synthesis.implications else 'empty — no API key'})")
+
+    # No thesis language in narrative or implications
+    thesis_words = ['recommend', 'must', 'bullish', 'bearish', 'buy', 'sell']
+    combined = (synthesis.narrative + synthesis.implications).lower()
+    has_thesis = any(w in combined for w in thesis_words)
     if has_thesis:
-        print("⚠ Warning: Thesis language detected in narrative")
+        print("⚠ Warning: Thesis language detected")
     else:
         print("✓ No thesis/recommendation language")
 

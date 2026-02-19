@@ -119,8 +119,7 @@ def _render_section1(claims: List[ClaimOutput]) -> str:
 
 def _render_section2(synthesis: Section2Synthesis) -> str:
     """
-    Section 2: LLM-generated narrative prose.
-    Rendered as paragraphs, not bullets.
+    Section 2: LLM-generated narrative prose + flagged implications subsection.
     """
     lines = []
     lines.append("## 2. Synthesis Across Sources")
@@ -130,6 +129,12 @@ def _render_section2(synthesis: Section2Synthesis) -> str:
         lines.append(synthesis.narrative)
     else:
         lines.append("*No cross-source synthesis available today.*")
+
+    if synthesis.implications:
+        lines.append("")
+        lines.append("### ⚑ Potential Implications")
+        lines.append("*Model-generated interpretation — challenge or discard as appropriate. Not a recommendation.*\n")
+        lines.append(synthesis.implications)
 
     return '\n'.join(lines)
 
