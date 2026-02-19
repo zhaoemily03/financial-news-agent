@@ -20,6 +20,7 @@ import io
 import os
 import re
 import time
+import random
 import hashlib
 import json
 from abc import ABC, abstractmethod
@@ -33,6 +34,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from dateutil import parser as dateparser
+import config as _cfg
 
 
 class BaseScraper(ABC):
@@ -97,6 +99,7 @@ class BaseScraper(ABC):
         chrome_options.add_argument('--window-size=1920,1080')
 
         self.driver = webdriver.Chrome(options=chrome_options)
+        self.driver.set_page_load_timeout(_cfg.PAGE_LOAD_TIMEOUT)
         print(f"[{self.PORTAL_NAME}] Initialized Chrome WebDriver")
 
         # Load cookies for authentication
@@ -168,6 +171,89 @@ class BaseScraper(ABC):
             'auth_required': True
         }
 
+    def _is_browser_alive(self) -> bool:
+        """Check if the Chrome session is still alive (crash detection)."""
+        try:
+            _ = self.driver.current_url
+            return True
+        except Exception:
+            return False
+
+    def _is_session_valid(self) -> bool:
+        """
+        Check if the current page is a login redirect (session expiry mid-run).
+        Distinct from _is_browser_alive — browser is alive but unauthenticated.
+        """
+        try:
+            url = self.driver.current_url.lower()
+            login_signals = ['login', 'signin', 'sign-in', 'sso', 'saml', 'oauth', 'authenticate']
+            if any(s in url for s in login_signals):
+                return False
+            title = self.driver.title.lower()
+            if 'sign in' in title or 'login' in title:
+                return False
+            return True
+        except Exception:
+            return False  # dead browser → treat as invalid
+
+    def _write_auth_alert(self):
+        """Write a flag file when manual re-authentication is needed."""
+        try:
+            os.makedirs('data/alerts', exist_ok=True)
+            alert_path = f'data/alerts/auth_required_{self.PORTAL_NAME}.txt'
+            with open(alert_path, 'w') as f:
+                f.write(f"{self.PORTAL_NAME} requires manual authentication\n")
+                f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                f.write(f"Action: re-run cookie refresh or set new verify link in .env\n")
+            print(f"[{self.PORTAL_NAME}] ⚠ Auth alert: {alert_path}")
+        except Exception as e:
+            print(f"[{self.PORTAL_NAME}] Failed to write auth alert: {e}")
+
+    def _restart_browser(self) -> bool:
+        """
+        Close and restart Chrome to clear memory / prevent session decay.
+        Returns False if re-authentication fails after restart.
+        """
+        print(f"[{self.PORTAL_NAME}] Restarting browser (batch boundary)...")
+        self.close_driver()
+        time.sleep(2)
+        if not self._init_driver():
+            print(f"[{self.PORTAL_NAME}] ✗ Re-authentication failed after restart")
+            self._write_auth_alert()
+            return False
+        self._sync_cookies_from_driver()
+        print(f"[{self.PORTAL_NAME}] ✓ Browser restarted successfully")
+        return True
+
+    def _request_delay(self):
+        """Human-like random delay between report navigations (avoids rate limiting)."""
+        delay = random.uniform(_cfg.REQUEST_DELAY_MIN, _cfg.REQUEST_DELAY_MAX)
+        time.sleep(delay)
+
+    def _navigate_to_report_with_retry(self, url: str) -> bool:
+        """
+        Navigate to a report URL with bounded retries + exponential backoff.
+        Prevents infinite loops: max MAX_NAV_RETRIES attempts total.
+        """
+        for attempt in range(_cfg.MAX_NAV_RETRIES):
+            try:
+                if self._navigate_to_report(url):
+                    # Verify we didn't land on a login page
+                    if not self._is_session_valid():
+                        print(f"    ✗ Session expired during navigation")
+                        self._write_auth_alert()
+                        return False
+                    return True
+            except Exception as e:
+                print(f"    ✗ Navigation attempt {attempt + 1}/{_cfg.MAX_NAV_RETRIES} failed: {e}")
+
+            if attempt < _cfg.MAX_NAV_RETRIES - 1:
+                wait = _cfg.NAV_RETRY_BACKOFF_BASE ** attempt  # 1s, 2s, 4s
+                print(f"    Retrying in {wait:.0f}s...")
+                time.sleep(wait)
+
+        return False
+
     # ------------------------------------------------------------------
     # Abstract Methods (portal-specific, must override)
     # ------------------------------------------------------------------
@@ -230,18 +316,37 @@ class BaseScraper(ABC):
     # ------------------------------------------------------------------
 
     def download_pdf(self, url: str) -> Optional[bytes]:
-        """Download PDF content from URL using authenticated session."""
-        try:
-            response = self.session.get(url, timeout=30)
-            if response.status_code == 200 and len(response.content) > 1000:
-                print(f"    Downloaded PDF ({len(response.content)} bytes)")
-                return response.content
-            else:
-                print(f"    Failed to download PDF: HTTP {response.status_code}")
-                return None
-        except Exception as e:
-            print(f"    Error downloading PDF: {e}")
-            return None
+        """
+        Download PDF via requests with retries, exponential backoff, and 429 handling.
+        Bounded to MAX_NAV_RETRIES attempts — no infinite loops.
+        """
+        for attempt in range(_cfg.MAX_NAV_RETRIES):
+            try:
+                response = self.session.get(url, timeout=_cfg.REQUEST_TIMEOUT)
+
+                if response.status_code == 200 and len(response.content) > 1000:
+                    print(f"    Downloaded PDF ({len(response.content)} bytes)")
+                    return response.content
+
+                elif response.status_code == 429:
+                    # Respect Retry-After header; cap at 5 minutes
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    wait = min(retry_after, 300)
+                    print(f"    Rate limited (429) — waiting {wait}s")
+                    time.sleep(wait)
+                    continue  # retry after wait
+
+                else:
+                    print(f"    Failed to download PDF: HTTP {response.status_code}")
+                    return None
+
+            except Exception as e:
+                print(f"    PDF download attempt {attempt + 1} failed: {e}")
+                if attempt < _cfg.MAX_NAV_RETRIES - 1:
+                    time.sleep(_cfg.NAV_RETRY_BACKOFF_BASE ** attempt)
+
+        print(f"    Failed to download PDF after {_cfg.MAX_NAV_RETRIES} attempts")
+        return None
 
     def extract_text_from_pdf(self, pdf_content: bytes) -> str:
         """Extract text from PDF bytes using pdfplumber (primary) or PyPDF2 (fallback)."""
@@ -367,7 +472,7 @@ class BaseScraper(ABC):
     # Main Entry Point (can be overridden if needed)
     # ------------------------------------------------------------------
 
-    def get_followed_reports(self, max_reports: int = 20, days: int = 7) -> Dict:
+    def get_followed_reports(self, max_reports: int = 20, days: int = 7, result_out: Dict = None) -> Dict:
         """
         Full pipeline: notifications -> filter -> extract content.
 
@@ -445,10 +550,36 @@ class BaseScraper(ABC):
             # Process each report with isolated error handling
             processed = []
             for i, report in enumerate(new_reports, 1):
+                # Crash detection: stop immediately, return what we have
+                if not self._is_browser_alive():
+                    print(f"[{self.PORTAL_NAME}] ✗ Browser crashed — returning {len(processed)} partial results")
+                    failures.append(f"Browser crashed at report {i}/{len(new_reports)}")
+                    break
+
+                # Session decay detection: login-page redirect mid-run
+                if not self._is_session_valid():
+                    print(f"[{self.PORTAL_NAME}] ✗ Session expired — stopping")
+                    self._write_auth_alert()
+                    failures.append(f"Session expired at report {i}/{len(new_reports)}")
+                    break
+
+                # Periodic browser restart to prevent memory leaks + session decay
+                if i > 1 and (i - 1) % _cfg.BROWSER_RESTART_AFTER_DOWNLOADS == 0:
+                    if not self._restart_browser():
+                        failures.append("Re-auth failed after browser restart")
+                        break
+                    # Re-sync cookies after restart
+                    self._sync_cookies_from_driver()
+
                 try:
                     print(f"\n  [{i}/{len(new_reports)}] {report['title'][:60]}")
 
-                    if not self._navigate_to_report(report['url']):
+                    # Human-like delay between navigations
+                    if i > 1:
+                        self._request_delay()
+
+                    # Bounded retry with exponential backoff — no infinite loops
+                    if not self._navigate_to_report_with_retry(report['url']):
                         failures.append(f"Failed to navigate: {report['title'][:40]}")
                         continue
 
@@ -456,6 +587,9 @@ class BaseScraper(ABC):
                     if content:
                         report['content'] = content
                         processed.append(report)
+                        # Live-write so partial results survive a timeout
+                        if result_out is not None:
+                            result_out['reports'].append(report)
                         self.report_tracker.mark_as_processed(report)
                     else:
                         failures.append(f"Failed to extract: {report['title'][:40]}")
@@ -478,7 +612,8 @@ class BaseScraper(ABC):
         except Exception as e:
             failures.append(f"Scraper error: {e}")
             print(f"[{self.PORTAL_NAME}] Scraper error: {e}")
-            return {'reports': [], 'failures': failures}
+            # Fix B: return partial results even on unexpected exception
+            return {'reports': processed if 'processed' in dir() else [], 'failures': failures}
 
         finally:
             self.close_driver()

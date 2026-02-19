@@ -226,7 +226,7 @@ TMT_CONFIG = AnalystConfig(
         'jefferies': {'enabled': True, 'credibility': 1.0},
         'substack': {'enabled': True, 'credibility': 0.6},
     },
-    briefing_days=5,
+    briefing_days=2,
     relevance_threshold=RELEVANCE_THRESHOLD,
 )
 

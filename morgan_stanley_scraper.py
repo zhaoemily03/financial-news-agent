@@ -70,6 +70,7 @@ class MorganStanleyScraper(BaseScraper):
         chrome_options.add_argument('--window-size=1920,1080')
 
         self.driver = webdriver.Chrome(options=chrome_options)
+        self.driver.set_page_load_timeout(30)
         print(f"[{self.PORTAL_NAME}] Initialized Chrome WebDriver")
 
         # First, try loading existing cookies
@@ -335,7 +336,14 @@ class MorganStanleyScraper(BaseScraper):
         try:
             # Wait for page to fully load - MS portal may have slow JS rendering
             print(f"[{self.PORTAL_NAME}] Waiting for page to load...")
-            time.sleep(10)
+            try:
+                # Wait for search bar to appear (up to 15s) instead of fixed sleep
+                WebDriverWait(self.driver, 15).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR,
+                        'input[type="search"], input[type="text"], input[placeholder]'))
+                )
+            except Exception:
+                time.sleep(4)  # Fallback if no input found
 
             # Strategy: Find search bar first, then look for elements to its right
             print(f"[{self.PORTAL_NAME}] Looking for search bar...")
@@ -670,7 +678,7 @@ class MorganStanleyScraper(BaseScraper):
 
         try:
             # Wait for feed content to load
-            time.sleep(2)
+            time.sleep(1)
 
             # Scroll down to load more reports (3 scroll attempts)
             for scroll_idx in range(3):
@@ -1012,7 +1020,14 @@ class MorganStanleyScraper(BaseScraper):
         """Navigate to a specific report page"""
         try:
             self.driver.get(report_url)
-            time.sleep(4)
+            # Wait for body to be present (page loaded), max 8s
+            try:
+                WebDriverWait(self.driver, 8).until(
+                    EC.presence_of_element_located((By.TAG_NAME, 'body'))
+                )
+                time.sleep(1)  # Brief settle for React rendering
+            except Exception:
+                time.sleep(4)
             return True
         except Exception as e:
             print(f"    ✗ Error navigating to report: {e}")
@@ -1023,7 +1038,7 @@ class MorganStanleyScraper(BaseScraper):
 
         # First, scroll down to reveal the PDF button
         self.driver.execute_script("window.scrollBy(0, 200)")
-        time.sleep(2)
+        time.sleep(1)
 
         # Look for PDF button (document icon in top right)
         pdf_url = self._get_pdf_url()

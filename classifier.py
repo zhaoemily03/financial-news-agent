@@ -91,9 +91,9 @@ Output ONLY valid JSON with these fields:
 - tickers: array of tracked stock tickers discussed (e.g. ["META", "GOOGL"]). Only include tickers from the tracked list above. Empty array if none.
 
 - tmt_subtopic: if category is tmt_sector, one of (cloud_enterprise_software, internet_digital_advertising, semiconductors_hardware, telecom_infrastructure, consumer_internet_media). null otherwise.
-  - cloud_enterprise_software: Cloud computing, SaaS, enterprise apps, developer tools
+  - cloud_enterprise_software: Cloud computing, SaaS, enterprise apps, developer tools, AI agents, LLMs, coding tools
   - internet_digital_advertising: Digital ads, ad tech, social media platforms, programmatic
-  - semiconductors_hardware: Chips, processors, GPU, data centers, devices
+  - semiconductors_hardware: Chips, processors, GPU, data centers, devices, AI inference hardware
   - telecom_infrastructure: 5G, wireless, broadband, towers, fiber, spectrum
   - consumer_internet_media: Streaming, gaming, e-commerce, consumer apps, content
 
@@ -110,8 +110,9 @@ Rules:
 2. A chunk about a tracked ticker should be tracked_ticker even if it also has sector implications
 3. Extract actual tickers mentioned — only tag tickers from the tracked list
 4. Boilerplate (disclosures, disclaimers, page headers/footers) → irrelevant
-5. Non-TMT sectors (healthcare, energy, industrials, etc.) → irrelevant
-6. When uncertain, prefer irrelevant over forcing a category"""
+5. Non-TMT sectors (healthcare, energy, industrials, consumer staples, real estate, etc.) → irrelevant
+6. AI, LLMs, developer tools, software disruption, chip performance, and enterprise tech are ALWAYS tmt_sector — do not mark these irrelevant even if no tracked ticker is named
+7. When genuinely uncertain between tmt_sector and irrelevant, prefer tmt_sector"""
 
 
 def _build_user_prompt(chunk: Chunk, doc: Optional[Document] = None) -> str:

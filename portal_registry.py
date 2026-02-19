@@ -22,7 +22,7 @@ from base_scraper import BaseScraper
 import config
 
 # Per-portal timeout (seconds). If a scraper takes longer, it's killed.
-PORTAL_TIMEOUT = 180  # 3 minutes
+PORTAL_TIMEOUT = 300  # 5 minutes default
 
 
 class PortalRegistry:
@@ -84,16 +84,18 @@ class PortalRegistry:
         headless: bool,
         result_out: Dict,
     ):
-        """Collect from a single portal. Writes to result_out dict (thread-safe)."""
+        """Collect from a single portal. Live-writes to result_out['reports'] as reports arrive."""
         try:
             scraper = self.get_scraper(portal_name, headless=headless)
             if not scraper:
                 result_out['failures'].append(f"{portal_name} (scraper not found)")
                 return
 
+            # Pass result_out so reports are live-written — partial results survive a timeout
             result = scraper.get_followed_reports(
                 max_reports=max_reports,
-                days=days
+                days=days,
+                result_out=result_out,
             )
 
             if result.get('auth_required'):
@@ -101,12 +103,11 @@ class PortalRegistry:
                 result_out['failures'].append(f"{portal_name} (auth required)")
                 return
 
-            reports = result.get('reports', [])
+            # Reports are already in result_out['reports'] via live-writes.
+            # Just add any failures from the return value.
             failures = result.get('failures', [])
-
-            result_out['reports'].extend(reports)
             result_out['failures'].extend([f"{portal_name}: {f}" for f in failures])
-            print(f"[Registry] {portal_name}: Collected {len(reports)} reports")
+            print(f"[Registry] {portal_name}: Collected {len(result_out['reports'])} reports")
 
         except Exception as e:
             result_out['failures'].append(f"{portal_name} (error: {str(e)[:80]})")
@@ -149,6 +150,7 @@ class PortalRegistry:
 
             portal_config = config.SOURCES.get(portal_name, {})
             max_reports = portal_config.get('max_reports', max_per_portal)
+            portal_timeout = portal_config.get('timeout', timeout)  # Per-portal override
 
             # Run scraper in a thread with timeout
             result_out = {'reports': [], 'failures': []}
@@ -158,12 +160,19 @@ class PortalRegistry:
                 daemon=True,
             )
             thread.start()
-            thread.join(timeout=timeout)
+            thread.join(timeout=portal_timeout)
 
             if thread.is_alive():
-                print(f"[Registry] {portal_name}: TIMEOUT after {timeout}s - skipping")
-                all_failures.append(f"{portal_name} (timeout after {timeout}s)")
-                # Thread is daemon, will be cleaned up on process exit
+                # Timed out — but live-writes may have already accumulated partial results
+                partial = result_out['reports']
+                if partial:
+                    print(f"[Registry] {portal_name}: TIMEOUT after {portal_timeout}s — salvaging {len(partial)} partial reports")
+                    all_reports.extend(partial)
+                    all_failures.append(f"{portal_name} (timeout — {len(partial)} partial reports included)")
+                else:
+                    print(f"[Registry] {portal_name}: TIMEOUT after {portal_timeout}s — no reports collected")
+                    all_failures.append(f"{portal_name} (timeout — 0 reports)")
+                # Daemon thread continues in background; results already captured above
             else:
                 all_reports.extend(result_out['reports'])
                 all_failures.extend(result_out['failures'])
@@ -230,12 +239,29 @@ def _auto_register():
     except ImportError:
         pass
 
-    # Future scrapers can be added here:
-    # try:
-    #     from jpmorgan_scraper import JPMorganScraper
-    #     registry.register('jpmorgan', JPMorganScraper)
-    # except ImportError:
-    #     pass
+    try:
+        from goldman_scraper import GoldmanScraper
+        registry.register('goldman', GoldmanScraper)
+    except ImportError:
+        pass
+
+    try:
+        from bernstein_scraper import BernsteinScraper
+        registry.register('bernstein', BernsteinScraper)
+    except ImportError:
+        pass
+
+    try:
+        from arete_scraper import AreteScraper
+        registry.register('arete', AreteScraper)
+    except ImportError:
+        pass
+
+    try:
+        from ubs_scraper import UBSScraper
+        registry.register('ubs', UBSScraper)
+    except ImportError:
+        pass
 
 
 # Run auto-registration on module import

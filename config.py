@@ -54,17 +54,19 @@ INVESTMENT_THEMES = [
     },
 ]
 
-# Substack Authors to Monitor
-SUBSTACK_AUTHORS = [
-    {
-        'name': 'Author Name',
-        'url': 'https://authorname.substack.com',
-        'has_rss': True,
-        'rss_url': 'https://authorname.substack.com/feed',
-        'requires_login': False
-    },
-    # Add more authors here
-]
+# Substack Authors (auto-discovered from forwarded Feishu emails)
+# No manual config needed — any Substack email forwarded to the
+# Feishu mailbox (FEISHU_MAILBOX in .env) is automatically ingested.
+SUBSTACK_AUTHORS = []
+
+# Browser reliability settings
+BROWSER_RESTART_AFTER_DOWNLOADS = 20   # restart Chrome every N reports (prevents memory leaks + session decay)
+PAGE_LOAD_TIMEOUT = 30                  # seconds before Selenium navigation times out
+MAX_NAV_RETRIES = 3                     # max retries on failed report navigation
+NAV_RETRY_BACKOFF_BASE = 2              # exponential backoff: wait 2^attempt seconds between retries
+REQUEST_TIMEOUT = 30                    # seconds for requests.Session PDF downloads
+REQUEST_DELAY_MIN = 1.5                 # minimum seconds between report navigations (human-like timing)
+REQUEST_DELAY_MAX = 3.5                 # maximum seconds between report navigations
 
 # Email Configuration
 EMAIL_CONFIG = {
@@ -96,25 +98,43 @@ SOURCES = {
         'scraper_class': 'MorganStanleyScraper',
     },
     'goldman': {
-        'enabled': False,  # Not implemented yet
-        'portal_url': 'https://marquee.gs.com',
+        'enabled': True,
+        'portal_url': 'https://marquee.gs.com/content/research/themes/homepage-default.html',
         'login_required': True,
-        'uses_followed_notifications': True,
+        'uses_followed_notifications': False,  # Uses "My Content" section
         'max_reports': 20,
-        'scraper_class': 'GoldmanScraper',  # Future: goldman_scraper.py
+        'timeout': 480,  # 8 min — Goldman is slow (PDF downloads + 20 reports)
+        'scraper_class': 'GoldmanScraper',
     },
-    'jpmorgan': {
-        'enabled': False,  # Not implemented yet
-        'portal_url': 'https://ny.matrix.ms.com',
+    'bernstein': {
+        'enabled': True,
+        'portal_url': 'https://www.bernsteinresearch.com/brweb/Home.aspx#/',
         'login_required': True,
-        'uses_followed_notifications': True,
+        'uses_followed_notifications': False,  # Uses Research tab + Industry filter
+        'max_reports': 25,
+        'scraper_class': 'BernsteinScraper',
+    },
+    'arete': {
+        'enabled': False,  # Not yet tested
+        'portal_url': 'https://portal.arete.net/',
+        'login_required': True,
+        'uses_followed_notifications': False,  # Uses "My Research" on home page
         'max_reports': 20,
-        'scraper_class': 'jpmorganscraper',  # Future: morgan_stanley_scraper.py
+        'scraper_class': 'AreteScraper',
+    },
+    'ubs': {
+        'enabled': False,  # Not yet tested
+        'portal_url': 'https://neo.ubs.com/home',
+        'login_required': True,
+        'uses_followed_notifications': False,  # Uses per-ticker search
+        'max_reports': 30,
+        'scraper_class': 'UBSScraper',
     },
     # Non-portal sources (separate ingestion pipeline)
     'substack': {
-        'enabled': False,  # Not implemented yet
-        'check_frequency_hours': 24
+        'enabled': True,
+        'check_frequency_hours': 24,
+        'days_lookback': 5,
     },
     'youtube': {
         'enabled': False,  # Phase 2
@@ -175,7 +195,6 @@ SOURCES = {
 # Filtering Configuration
 RELEVANCE_THRESHOLD = 0.7  # 0-1 score for content relevance
 MIN_CONTENT_LENGTH = 100  # Minimum words to process
-MAX_BRIEFING_ITEMS_PER_TIER = 10  # Max items per tier to keep briefing concise
 
 # Priority tiers for tickers (affects Tier 1 filtering)
 TICKER_PRIORITY = {

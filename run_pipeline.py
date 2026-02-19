@@ -21,10 +21,10 @@ from schemas import Document, Chunk, Claim
 from normalizer import DocumentNormalizer
 from chunker import chunk_document, estimate_tokens
 from classifier import classify_chunks, filter_irrelevant, ChunkClassification
-from claim_extractor import extract_claims, cap_claims_per_group, ClaimOutput
+from claim_extractor import extract_claims, sort_claims_by_priority, ClaimOutput
 from tier2_synthesizer import synthesize_section2, Section2Synthesis
 from briefing_renderer import render_briefing, count_words, count_pages
-from config import TRUSTED_ANALYSTS, ALL_TICKERS, MACRO_NEWS
+from config import TRUSTED_ANALYSTS, ALL_TICKERS, MACRO_NEWS, SOURCES
 
 # Sentiment Drift Detection
 from claim_tracker import ClaimTracker
@@ -314,7 +314,7 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
         print(f"  Enabled portals: {', '.join(enabled) if enabled else 'none'}")
 
         if enabled:
-            result = registry.collect_all(days=5, max_per_portal=25, headless=True)
+            result = registry.collect_all(days=2, max_per_portal=25, headless=True)
             reports = result.get('reports', [])
             source_failures = result.get('failures', [])
 
@@ -393,6 +393,30 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
     else:
         print("  Macro news: disabled in config")
 
+    # 1d: Collect from Substack via Feishu Mail
+    substack_config = SOURCES.get('substack', {})
+    if substack_config.get('enabled', False):
+        try:
+            from substack_feishu import collect_substack
+
+            print(f"\n  Collecting Substack newsletters...")
+            substack_reports = collect_substack(
+                days=substack_config.get('days_lookback', 5),
+            )
+            if substack_reports:
+                reports.extend(substack_reports)
+                print(f"  ✓ Collected {len(substack_reports)} Substack article(s)")
+            else:
+                print("  ⚠ No Substack articles found")
+
+        except ImportError:
+            print("  Substack: module not available")
+        except Exception as e:
+            print(f"  ⚠ Substack collection failed: {e}")
+            source_failures.append(f"Substack (error: {str(e)[:50]})")
+    else:
+        print("  Substack: disabled in config")
+
     # Summary
     print("\n  --- Collection Summary ---")
     if reports:
@@ -454,7 +478,7 @@ TMT_PREFILTER_KEYWORDS = [
     'gaming', 'fintech', 'payments', 'zero trust', 'endpoint',
 ]
 
-PASSTHROUGH_SOURCES = {'podcast', 'macro_news'}
+PASSTHROUGH_SOURCES = {'podcast', 'macro_news', 'substack'}
 
 
 def stage_2b_prefilter(
@@ -572,9 +596,9 @@ def stage_5_extract_claims(
     classified: List[Tuple[Document, List[Chunk], List[ChunkClassification]]],
     stats: PipelineStats,
 ) -> List[ClaimOutput]:
-    """Stage 5: Extract claims + apply per-ticker cap."""
+    """Stage 5: Extract claims + sort by priority (no cap)."""
     print("\n" + "=" * 60)
-    print("[5/7] CLAIMS — Extract Atomic Claims + Per-Group Cap")
+    print("[5/7] CLAIMS — Extract Atomic Claims + Sort by Priority")
     print("=" * 60)
 
     from openai import OpenAI
@@ -587,14 +611,14 @@ def stage_5_extract_claims(
         doc_claims = extract_claims(chunks, clfs, doc, client)
         all_claims.extend(doc_claims)
 
-    # Apply per-ticker/subtopic/macro cap (max 3 per group)
-    capped_claims = cap_claims_per_group(all_claims)
+    # Sort by priority within groups — no cap
+    sorted_claims = sort_claims_by_priority(all_claims)
 
-    total_bullets = sum(len(c.bullets) for c in capped_claims)
-    stats.log("claims+cap", sum(len(c) for _, c, _ in classified), len(capped_claims),
-              f"{total_bullets} bullets, {len(all_claims) - len(capped_claims)} capped")
-    print(f"\n  ✓ Extracted {len(all_claims)} claims → {len(capped_claims)} after per-group cap")
-    return capped_claims
+    total_bullets = sum(len(c.bullets) for c in sorted_claims)
+    stats.log("claims", sum(len(c) for _, c, _ in classified), len(sorted_claims),
+              f"{total_bullets} bullets, all claims kept")
+    print(f"\n  ✓ Extracted {len(sorted_claims)} claims (all kept, sorted by priority)")
+    return sorted_claims
 
 
 def stage_5b_file_claims(

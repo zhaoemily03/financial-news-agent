@@ -129,7 +129,7 @@ See README.md for the full pipeline with AI/non-AI markers.
 | `macro_news.py` | RSS macro news collection (Reuters, CNBC) | No |
 | `chunker.py` | Document → Chunks (~500 tokens) | No |
 | `classifier.py` | 4-category chunk classification + `filter_irrelevant()` | **Yes** |
-| `claim_extractor.py` | Chunk → atomic claims + `cap_claims_per_group()` | **Yes** |
+| `claim_extractor.py` | Chunk → atomic claims + `sort_claims_by_priority()` | **Yes** |
 | `claim_tracker.py` | Historical claim storage (SQLite) | No |
 | `drift_detector.py` | Cross-time belief shift detection | No |
 | `tier2_synthesizer.py` | Section 2 narrative synthesis (agreement/disagreement) | **Yes** |
@@ -144,7 +144,7 @@ See README.md for the full pipeline with AI/non-AI markers.
 |--------|-------------|
 | `tier_router.py` | Classifier `category` field routes directly |
 | `implication_router.py` | No Tier 3 section in V3 |
-| `triage.py` | `filter_irrelevant()` + per-ticker claim cap |
+| `triage.py` | `filter_irrelevant()` |
 
 ### Drift Detection (Deterministic, No AI)
 
@@ -161,12 +161,12 @@ This is deterministic — no LLM calls. It compares `confidence_level` and `beli
 
 | # | Section | Content | Status |
 |---|---------|---------|--------|
-| 1 | Objective Breaking News | Per-ticker updates (max 3 each, "No Update" if nothing) + TMT sector-level | **Live** |
+| 1 | Objective Breaking News | Per-ticker updates (all non-redundant claims, "No Update" if nothing) + TMT sector-level | **Live** |
 | 2 | Synthesis Across Sources | LLM narrative: where sources agree/disagree, considering credibility | **Live** |
 | 3 | Macro Connections | Macro claims + TMT linkage | **Phase 2 stub** |
 | 4 | Longitudinal Delta Detection | Drift signals, belief shifts over time | **Phase 2 stub** |
 
-Section 1 routes claims by `category`: `tracked_ticker` → per-ticker groups, `tmt_sector` → sector sub-section. Section 2 uses `tier2_synthesizer.py` with source credibility from `analyst_config_tmt.SOURCE_CREDIBILITY`. Per-ticker claim cap (max 3) is enforced by `cap_claims_per_group()` in `claim_extractor.py`.
+Section 1 routes claims by `category`: `tracked_ticker` → per-ticker groups, `tmt_sector` → sector sub-section. Section 2 uses `tier2_synthesizer.py` with source credibility from `analyst_config_tmt.SOURCE_CREDIBILITY`. All non-redundant relevant claims are kept; `sort_claims_by_priority()` in `claim_extractor.py` orders them (breaking > contrarian first) with no cap.
 
 ### Data Ingestion (Multi-Portal Framework)
 
@@ -189,6 +189,14 @@ Section 1 routes claims by `category`: `tracked_ticker` → per-ticker groups, `
 | `rss_podcast.py` | RSS-based podcasts (BG2 Pod, Acquired) |
 | `podcast_tracker.py` | SQLite episode deduplication |
 
+### Substack Ingestion (via Feishu Mail)
+
+| Module | Purpose |
+|--------|---------|
+| `substack_feishu.py` | Fetch forwarded Substack emails from Feishu Mail API |
+
+Substack newsletters are forwarded to a Feishu mailbox. The module uses a tenant_access_token from an Internal App ("Substack_Ingestion_Agent") to read the inbox, filter for Substack emails, and extract article content. No manual author config needed — any forwarded Substack email is auto-ingested.
+
 ---
 
 ## Configuration
@@ -197,13 +205,12 @@ Section 1 routes claims by `category`: `tracked_ticker` → per-ticker groups, `
 |------|---------|
 | `config.py` | Tickers, analysts, themes, relevance threshold |
 | `analyst_config_tmt.py` | TMT-specific topic weights and source credibility |
-| `.env` | API keys (OPENAI_API_KEY), portal credentials (MS_EMAIL, MS_VERIFY_LINK) — gitignored |
+| `.env` | API keys (OPENAI_API_KEY), portal credentials (MS_EMAIL, MS_VERIFY_LINK), Feishu credentials (FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_MAILBOX) — gitignored |
 | `data/cookies.json` | Portal session cookies (Jefferies, Morgan Stanley) — gitignored |
 
 ### Key Config Values
 
 - **BRIEFING_DAYS**: 5 (only process reports from last 5 days)
-- **MAX_CLAIMS_PER_GROUP**: 3 (per ticker/subtopic/macro group)
 - **Primary tickers**: META, GOOGL, AMZN, AAPL, BABA, 700.HK, MSFT, CRWD, ZS, PANW, NET, DDOG, SNOW, MDB
 - **Trusted analysts**: Brent Thill, Joseph Gallo (Jefferies)
 - **Categories**: tracked_ticker, tmt_sector, macro, irrelevant
@@ -215,7 +222,7 @@ Section 1 routes claims by `category`: `tracked_ticker` → per-ticker groups, `
 Scope filtering happens at **two levels** in the V3 pipeline:
 
 1. **Stage 2b — Document pre-filter** (deterministic): Drops entire documents with no TMT relevance before classification. Checks title + first chunks for covered tickers or TMT keywords. Podcasts and macro news always pass.
-2. **Stage 4 — Classify + Filter** (LLM + deterministic): Classifier assigns 4 categories. `filter_irrelevant()` drops `irrelevant` chunks before claim extraction. Per-ticker claim cap (max 3) enforces brevity.
+2. **Stage 4 — Classify + Filter** (LLM + deterministic): Classifier assigns 4 categories. `filter_irrelevant()` drops `irrelevant` chunks before claim extraction. All non-redundant claims are kept.
 
 Old stages removed: chunk-level scope (4b), triage (5), claim-level scope (6b). The classifier `irrelevant` category replaces all three.
 
@@ -305,7 +312,7 @@ The system uses a `PodcastRegistry` to manage multiple podcast sources. Podcasts
 
 - [x] V3 4-section briefing pipeline (Sections 1+2 live, 3+4 stubbed)
 - [x] 4-category classifier (tracked_ticker, tmt_sector, macro, irrelevant)
-- [x] Per-ticker claim cap (max 3 most important per group)
+- [x] Claims sorted by priority within groups (breaking > contrarian first, no cap)
 - [x] Section 2 LLM narrative synthesis with source credibility
 - [x] Jefferies portal scraping (Selenium + SSO cookies)
 - [x] PDF text extraction (pdfplumber + PyPDF2 fallback)
@@ -319,5 +326,5 @@ The system uses a `PodcastRegistry` to manage multiple podcast sources. Podcasts
 - [ ] Section 3: Macro Connections (Phase 2)
 - [ ] Section 4: Longitudinal Delta Detection rendering (Phase 2)
 - [ ] End-to-end pipeline integration test
-- [ ] Substack ingestion
+- [x] Substack ingestion (Feishu Mail API)
 - [ ] Email delivery
