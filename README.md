@@ -48,7 +48,7 @@ What the system will never do:
 ## High-Level Pipeline (V3)
 
 ```
-Collect → Normalize → Pre-filter → Chunk → Classify+Filter → Claims+Cap → File Claims → Drift → Synthesize → Render
+Collect → Normalize → Pre-filter → Chunk → Classify+Prioritize → Claims+Sort → File Claims → Drift → Synthesize → Render
 ```
 
 | Step | Module | AI? | Description |
@@ -57,13 +57,13 @@ Collect → Normalize → Pre-filter → Chunk → Classify+Filter → Claims+Ca
 | 2. **Normalize** | `normalizer.py` | No | Convert to structured `Document` objects |
 | 2b. **Pre-filter** | `run_pipeline.py` | No | Drop non-TMT docs by ticker/keyword before LLM |
 | 3. **Chunk** | `chunker.py` | No | Split into atomic units (~500 tokens) |
-| 4. **Classify+Filter** | `classifier.py` | **Yes** | 4-category classification + `filter_irrelevant()` |
-| 5. **Claims+Cap** | `claim_extractor.py` | **Yes** | Extract atomic claims, cap at 3 per ticker/group |
+| 4. **Classify+Prioritize** | `classifier.py` | **Yes** | 4-category classification + `filter_irrelevant()` |
+| 5. **Claims+Sort** | `claim_extractor.py` | **Yes** | Extract atomic claims + `sort_claims_by_priority()` (no cap; high-alert always shown) |
 | 5b. **File Claims** | `claim_tracker.py` | No | Store claims in SQLite for historical tracking |
 | 5c. **Drift Detect** | `drift_detector.py` | No | Compare today's claims against history for belief shifts |
 | 6. **Synthesize+Render** | `tier2_synthesizer.py` + `briefing_renderer.py` | **Yes** | Section 2 narrative + 4-section briefing output |
 
-**Removed stages (V3):** Chunk scope (4b), Triage (5), Claim scope (6b), Tier routing (7), Tier 3 indexing (9). The classifier's `irrelevant` category + per-ticker claim cap replace these.
+**Removed stages (V3):** Chunk scope (4b), Triage (5), Claim scope (6b), Tier routing (7), Tier 3 indexing (9). The classifier's `irrelevant` category replaces these. No hard claim cap — high-alert events always shown; `sort_claims_by_priority()` orders by breaking → contrarian first.
 
 ---
 
@@ -199,15 +199,19 @@ The system uses a **PortalRegistry** to manage multiple sell-side research porta
 
 | Source | Status | Notes |
 |--------|--------|-------|
-| **Jefferies Research** | 👎 Not working | continues needing manual reauthentication
 | **Morgan Stanley Matrix** | ✅ Working | Selenium scraper with email verification auth |
+| **Goldman Sachs** | ✅ Working | Selenium scraper |
+| **Bernstein** | ✅ Working | Selenium scraper |
+| **UBS** | ✅ Working | Selenium scraper |
+| **Arete** | ✅ Working | Selenium scraper |
+| **Jefferies Research** | 👎 Not working | Continues needing manual reauthentication |
+| **Substack** | ✅ Working | Via Feishu Mail API (forwarded emails) |
 
 ### Planned Sell-Side Portals
 
 | Source | Status | Notes |
 |--------|--------|-------|
-| JP Morgan | 🔲 Template ready | Enable in `config.py`, implement `jpmorgan_scraper.py` |
-| Goldman Sachs | 🔲 Template ready | Enable in `config.py`, implement `goldman_scraper.py` |
+| JP Morgan | 🔲 Not yet implemented | Enable in `config.py`, implement `jpmorgan_scraper.py` |
 
 ### Adding a New Portal
 
@@ -241,11 +245,10 @@ The system uses a **PodcastRegistry** to manage multiple podcast sources. Podcas
 3. Register in `podcast_registry.py`
 4. Enable in `config.py` SOURCES['podcasts']['sources']
 
-### Other Sources (Planned)
+### Other Sources
 
 | Source | Status | Notes |
 |--------|--------|-------|
-| Substack | 🔲 Placeholder | RSS-based ingestion planned |
 | X (Twitter) | 🔲 Module ready | Requires X API Basic tier ($100/mo) for read access. Free tier is write-only. |
 
 ---
@@ -402,10 +405,17 @@ NFLX, SPOT, U, APP, RBLX, ORCL, PLTR, SHOP
 
 - [x] V3 4-section briefing pipeline (Sections 1+2 live, 3+4 stubbed)
 - [x] 4-category classifier (tracked_ticker, tmt_sector, macro, irrelevant)
-- [x] Per-ticker claim cap (max 3 most important per group)
+- [x] Claims sorted by priority (breaking > contrarian first, no hard cap)
+- [x] High-alert events always shown uncapped in Section 1 (earnings, guidance, M&A, regulatory, leadership, operational metrics)
 - [x] Section 2 LLM narrative synthesis with source credibility, analyst prose context, and secondaries implications subsection
-- [x] Jefferies portal scraping (Selenium + SSO cookies)
+- [x] Independent sources (Substack, podcast) weighted equally to sell-side in synthesis
+- [x] Jefferies portal scraping (Selenium + SSO cookies) — auth issues
 - [x] Morgan Stanley Matrix scraping (Selenium + email verification)
+- [x] Goldman Sachs scraping (Selenium)
+- [x] Bernstein scraping (Selenium)
+- [x] UBS scraping (Selenium)
+- [x] Arete scraping (Selenium)
+- [x] Substack ingestion (Feishu Mail API)
 - [x] PDF text extraction (pdfplumber + PyPDF2 fallback)
 - [x] Document normalization and chunking
 - [x] Podcast ingestion (All-In, BG2 Pod, Acquired)
@@ -418,5 +428,4 @@ NFLX, SPOT, U, APP, RBLX, ORCL, PLTR, SHOP
 - [ ] Section 3: Macro Connections (Phase 2)
 - [ ] Section 4: Longitudinal Delta Detection rendering (Phase 2)
 - [ ] X (Twitter) ingestion (module ready, requires paid API tier)
-- [ ] Substack ingestion
 - [ ] Email delivery
