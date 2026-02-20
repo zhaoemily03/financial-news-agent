@@ -81,8 +81,8 @@ Collect → Normalize → Pre-filter → Chunk → Classify+Filter → Claims+Ca
 
 | Task | Why Not AI? |
 |------|-------------|
-| **Relevance Filtering** | Classifier assigns `irrelevant` category; `filter_irrelevant()` drops deterministically. |
-| **Claim Capping** | `cap_claims_per_group()` keeps max 3 per ticker/group. Rule-based priority sort. |
+| **Relevance Filtering** | Classifier assigns `irrelevant` category; `filter_irrelevant()` drops deterministically. High-alert event types (earnings, guidance, org, regulation) are explicitly protected from `irrelevant` by classifier rule 8. |
+| **Claim Capping** | Max 3 regular claims per ticker. High-alert claims (`_is_high_alert()`) bypass the cap entirely — always shown. Rule-based, auditable. |
 | **Drift Detection** | `drift_detector.py` compares metadata over time. Deterministic. |
 | **Output Formatting** | Template-driven rendering. Consistent every day. |
 | **Conviction or Recommendations** | Humans decide. System describes. |
@@ -105,14 +105,16 @@ The V3 briefing uses a **4-section purpose-driven layout**. Claims are routed by
 | 4 | Longitudinal Delta Detection | Drift signals, belief shifts over time | **Phase 2 stub** |
 
 ### Section 1: Objective Breaking News
-- **Tracked tickers**: Iterates ALL tickers from `config.ALL_TICKERS`. Max 3 claims per ticker, sorted by time sensitivity then belief pressure. Shows "No Update" for tickers with nothing.
+- **Tracked tickers**: Iterates ALL tickers from `config.ALL_TICKERS`. Shows "No Update" for tickers with nothing.
+- **High-alert events are never missed**: Claims with `event_type` in `HIGH_ALERT_EVENT_TYPES` (earnings, guidance, org, regulation) and `is_descriptive_event=True` are always shown, uncapped, marked with `⚠`. This guarantees M&A, CEO changes, earnings beats/misses, guidance revisions, and regulatory actions are never dropped by the 3-claim cap.
+- **Regular claims**: Capped at 3 per ticker (after high-alert claims are shown), sorted breaking > upcoming > ongoing, contrarian before confirming.
 - **TMT sector**: Groups `tmt_sector` claims by event type.
 
 ### Section 2: Synthesis Across Sources
 - LLM-generated narrative prose (not bullets), up to 750 words
 - Each claim fed alongside the analyst's original prose excerpt — gives the LLM the reasoning chain, not just atomized bullets
-- Considers source credibility from `analyst_config_tmt.SOURCE_CREDIBILITY`
-- Surfaces where sources agree and disagree, where they talk past each other
+- **Independent sources are not weighted lower than sell-side**: `SOURCE_CREDIBILITY` scores are equalized (sell-side 0.8, Substack 0.75). The synthesis prompt explicitly notes that sell-side has structural positive/buy-side bias and instructs the LLM to treat sell-side vs independent divergence as the highest-priority signal.
+- **Priority order**: (1) sell-side vs independent source divergence first — high signal because independent sources have no deal-flow incentives; (2) sell-side internal disagreements; (3) full cross-source convergence — the strongest signal.
 - No thesis language — describes patterns, doesn't recommend
 - **⚑ Potential Implications subsection**: second-pass LLM call through a secondaries analyst lens — surfaces comp dynamics, liquidity timing, and information asymmetry signals. Explicitly flagged as model-generated interpretation.
 

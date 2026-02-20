@@ -161,12 +161,14 @@ This is deterministic — no LLM calls. It compares `confidence_level` and `beli
 
 | # | Section | Content | Status |
 |---|---------|---------|--------|
-| 1 | Objective Breaking News | Per-ticker updates (all non-redundant claims, "No Update" if nothing) + TMT sector-level | **Live** |
-| 2 | Synthesis Across Sources | LLM narrative: where sources agree/disagree, considering credibility | **Live** |
+| 1 | Objective Breaking News | Per-ticker updates + TMT sector-level. High-alert events always shown uncapped (⚠). | **Live** |
+| 2 | Synthesis Across Sources | LLM narrative: sell-side vs independent divergence first, then internal disagreements | **Live** |
 | 3 | Macro Connections | Macro claims + TMT linkage | **Phase 2 stub** |
 | 4 | Longitudinal Delta Detection | Drift signals, belief shifts over time | **Phase 2 stub** |
 
-Section 1 routes claims by `category`: `tracked_ticker` → per-ticker groups, `tmt_sector` → sector sub-section. Section 2 uses `tier2_synthesizer.py` with source credibility from `analyst_config_tmt.SOURCE_CREDIBILITY`. All non-redundant relevant claims are kept; `sort_claims_by_priority()` in `claim_extractor.py` orders them (breaking > contrarian first) with no cap.
+**Section 1 guarantees:** High-alert events (`HIGH_ALERT_EVENT_TYPES` in `analyst_config_tmt.py`) are never filtered and always shown uncapped, marked ⚠. Regular claims are capped at 3 per ticker after filling high-alert slots. "No Update" shown for tickers with no claims. Routes claims by `category`: `tracked_ticker` → per-ticker groups, `tmt_sector` → sector sub-section.
+
+**Section 2 guarantees:** Independent sources (Substack, podcast) are weighted equally to sell-side — never lower. `SOURCE_CREDIBILITY` scores reflect this parity (gap ≤ 0.05). Synthesis prioritizes sell-side vs independent divergences before sell-side internal disagreements. Sell-side structural positive bias is surfaced explicitly in the narrative prompt so the LLM does not treat sell-side consensus as ground truth.
 
 ### Data Ingestion (Multi-Portal Framework)
 
@@ -214,6 +216,8 @@ Substack newsletters are forwarded to a Feishu mailbox. The module uses a tenant
 - **Primary tickers**: META, GOOGL, AMZN, AAPL, BABA, 700.HK, MSFT, CRWD, ZS, PANW, NET, DDOG, SNOW, MDB
 - **Trusted analysts**: Brent Thill, Joseph Gallo (Jefferies)
 - **Categories**: tracked_ticker, tmt_sector, macro, irrelevant
+- **HIGH_ALERT_EVENT_TYPES**: earnings, guidance, org, regulation — these bypass the 3-claim cap in Section 1 and are marked ⚠. Operational metrics (event_type='market' + is_descriptive_event + has_belief_delta) also high-alert.
+- **Source credibility parity**: sell-side 0.8, substack 0.75, podcast 0.65. Independent sources are never weighted below sell-side in synthesis. `SELL_SIDE_SOURCES`, `INDEPENDENT_SOURCES`, `SOURCE_BIAS_NOTES` all in `analyst_config_tmt.py`.
 
 ---
 
@@ -313,7 +317,10 @@ The system uses a `PodcastRegistry` to manage multiple podcast sources. Podcasts
 - [x] V3 4-section briefing pipeline (Sections 1+2 live, 3+4 stubbed)
 - [x] 4-category classifier (tracked_ticker, tmt_sector, macro, irrelevant)
 - [x] Claims sorted by priority within groups (breaking > contrarian first, no cap)
+- [x] High-alert events uncapped in Section 1 (earnings, guidance, M&A, regulatory, leadership, operational metrics)
 - [x] Section 2 LLM narrative synthesis with source credibility
+- [x] Independent sources (Substack, podcast) weighted equally to sell-side in synthesis
+- [x] Sell-side structural positive bias surfaced explicitly in Section 2 prompt
 - [x] Jefferies portal scraping (Selenium + SSO cookies)
 - [x] PDF text extraction (pdfplumber + PyPDF2 fallback)
 - [x] Document normalization and chunking

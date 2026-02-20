@@ -42,24 +42,67 @@ SUBTOPIC_WEIGHTS = {
 }
 
 # ------------------------------------------------------------------
-# Source Credibility — trust scores by source
+# Source Credibility — analytical depth scores by source
 # ------------------------------------------------------------------
 # Scale: 0.0 (untrusted) to 1.0 (highly trusted)
-# Used by tier2_synthesizer.py for Section 2 narrative
+# Used by tier2_synthesizer.py for Section 2 narrative.
+#
+# NOTE: Credibility here reflects analytical rigor and data access,
+# NOT directional accuracy. Sell-side has structural positive bias
+# (compensation tied to deal flow; ratings skew constructive).
+# Independent sources (Substack) have no such structural constraint.
 
 SOURCE_CREDIBILITY = {
-    'jefferies': 1.0,          # Primary trusted source
-    'jpmorgan': 0.9,
-    'morgan_stanley': 0.9,
-    'goldman': 0.9,
-    'bofa': 0.85,
-    'citi': 0.85,
-    'ubs': 0.8,
-    'barclays': 0.8,
-    'substack': 0.6,           # Independent, variable quality
-    'podcast': 0.5,            # Podcast hosts
+    'jefferies': 0.8,          # High rigor; structural positive/buy-side bias
+    'jpmorgan': 0.8,
+    'morgan_stanley': 0.8,
+    'goldman': 0.8,
+    'bernstein': 0.8,
+    'bofa': 0.75,
+    'citi': 0.75,
+    'ubs': 0.75,
+    'barclays': 0.75,
+    'substack': 0.75,          # Independent; no structural directional bias; quality varies by author
+    'podcast': 0.65,           # Market commentary; informal but unconstrained
     'x': 0.4,                  # Social media, low signal
     'unknown': 0.3,
+}
+
+# ------------------------------------------------------------------
+# High-Alert Event Types — always surface in Section 1, never filtered
+# ------------------------------------------------------------------
+# Claims with these event_type values are shown regardless of claim cap.
+# Maps to the event_type field in ClaimOutput (see claim_extractor.py).
+
+HIGH_ALERT_EVENT_TYPES = {
+    'earnings',    # Quarterly results, beats/misses, restatements, write-downs
+    'guidance',    # Guidance changes, preannouncements, mid-quarter revisions
+    'org',         # M&A, CEO/CFO/board changes, restructurings, spin-offs, bankruptcy
+    'regulation',  # Antitrust actions, litigation outcomes, regulatory approval/denial
+}
+# Operational metric events (subscriber misses/beats, churn, ARPU, major contract wins/losses)
+# map to event_type='market' with is_descriptive_event=True — also treated as high-alert.
+
+# Source type groupings — used by synthesizer to surface cross-type tension
+SELL_SIDE_SOURCES = {
+    'jefferies', 'jpmorgan', 'morgan_stanley', 'goldman', 'bernstein',
+    'bofa', 'citi', 'ubs', 'barclays',
+}
+INDEPENDENT_SOURCES = {'substack', 'podcast', 'x'}
+
+# Source bias notes — passed to LLM synthesis prompt
+SOURCE_BIAS_NOTES = {
+    'sell_side': (
+        'High analytical depth and data access. '
+        'Structural positive bias: compensation tied to deal flow and buy-side relationships; '
+        'ratings and price targets tend to skew constructive. '
+        'Sell-side consensus is a weak signal — it often lags reality.'
+    ),
+    'independent': (
+        'No structural directional bias. '
+        'Quality varies by author but views are unconstrained by deal relationships. '
+        'When independent sources diverge from sell-side, treat as high-signal.'
+    ),
 }
 
 # ------------------------------------------------------------------

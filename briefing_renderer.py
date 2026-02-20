@@ -23,6 +23,7 @@ from collections import defaultdict
 from claim_extractor import ClaimOutput
 from tier2_synthesizer import Section2Synthesis
 from classifier import TMT_SUBTOPICS
+from analyst_config_tmt import HIGH_ALERT_EVENT_TYPES
 import config
 
 # ------------------------------------------------------------------
@@ -31,6 +32,24 @@ import config
 
 MAX_WORDS = 2500           # ~5 pages at 500 words/page
 MAX_CLAIMS_PER_TICKER = 3
+
+
+# ------------------------------------------------------------------
+# High-Alert Detection
+# ------------------------------------------------------------------
+
+def _is_high_alert(claim: ClaimOutput) -> bool:
+    """
+    True if this claim should always appear regardless of the per-ticker cap.
+    Covers: earnings, guidance changes, M&A/leadership/restructuring, regulatory actions,
+    and concrete operational metric events (subscriber beats/misses, churn, ARPU, contracts).
+    """
+    if claim.event_type in HIGH_ALERT_EVENT_TYPES and claim.is_descriptive_event:
+        return True
+    # Operational metric signals: event_type='market' with a concrete fact
+    if claim.event_type == 'market' and claim.is_descriptive_event and claim.has_belief_delta:
+        return True
+    return False
 
 
 # ------------------------------------------------------------------
@@ -75,8 +94,17 @@ def _render_section1(claims: List[ClaimOutput]) -> str:
         time_order = {'breaking': 0, 'upcoming': 1, 'ongoing': 2}
         ticker_group.sort(key=lambda c: time_order.get(c.time_sensitivity, 3))
 
+        # Split: high-alert claims always shown (uncapped); regular claims capped
+        high_alert = [c for c in ticker_group if _is_high_alert(c)]
+        regular = [c for c in ticker_group if not _is_high_alert(c)]
+        regular_cap = max(0, MAX_CLAIMS_PER_TICKER - len(high_alert))
+
         lines.append(f"**{ticker}**")
-        for claim in ticker_group[:MAX_CLAIMS_PER_TICKER]:
+        for claim in high_alert:
+            bullet = claim.bullets[0]
+            lines.append(f"- ⚠ {bullet}")
+            lines.append(f"  *— {claim.source_citation}*")
+        for claim in regular[:regular_cap]:
             bullet = claim.bullets[0]
             lines.append(f"- {bullet}")
             lines.append(f"  *— {claim.source_citation}*")

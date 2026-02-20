@@ -112,7 +112,18 @@ Rules:
 4. Boilerplate (disclosures, disclaimers, page headers/footers) → irrelevant
 5. Non-TMT sectors (healthcare, energy, industrials, consumer staples, real estate, etc.) → irrelevant
 6. AI, LLMs, developer tools, software disruption, chip performance, and enterprise tech are ALWAYS tmt_sector — do not mark these irrelevant even if no tracked ticker is named
-7. When genuinely uncertain between tmt_sector and irrelevant, prefer tmt_sector"""
+7. When genuinely uncertain between tmt_sector and irrelevant, prefer tmt_sector
+8. NEVER classify as irrelevant if the chunk announces or describes ANY of the following for a named company:
+   - Earnings results, revenue/EPS beats or misses, impairments, write-downs, restatements
+   - Guidance changes, preannouncements, mid-quarter revisions, major contract wins/losses
+   - M&A transactions, acquisitions, divestitures, take-privates, mergers, spin-offs
+   - CEO, CFO, or key business-unit leadership changes; board changes; activist situations
+   - Bankruptcy, distress events, capital structure changes, restructurings
+   - Antitrust investigations or actions, major litigation outcomes, regulatory approval/denial
+   - Major product launches, product recalls, significant pricing changes in SaaS/platform businesses
+   - Subscriber/user growth beats or misses, churn spikes, ARPU inflections (for streaming/SaaS/social)
+   These are HIGH-ALERT events and must be routed as tracked_ticker (if a tracked ticker is named)
+   or tmt_sector (if sector-level). Only mark irrelevant if the chunk is pure boilerplate/disclaimer."""
 
 
 def _build_user_prompt(chunk: Chunk, doc: Optional[Document] = None) -> str:

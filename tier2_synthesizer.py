@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from claim_extractor import ClaimOutput
-from analyst_config_tmt import SOURCE_CREDIBILITY
+from analyst_config_tmt import SOURCE_CREDIBILITY, SELL_SIDE_SOURCES, INDEPENDENT_SOURCES, SOURCE_BIAS_NOTES
 
 # ------------------------------------------------------------------
 # Result Dataclasses
@@ -323,15 +323,27 @@ def _detect_theme_disagreements(claims: List[ClaimOutput]) -> List[DisagreementC
 
 NARRATIVE_SYSTEM_PROMPT = """You are a hedge fund analyst reading across all materials for a daily TMT briefing.
 
-Your job: Compare perspectives across sources — do NOT summarize sequentially.
-Weight conflicting views by source credibility scores provided.
-Use the analyst's original language (provided as context alongside each claim) to understand
-the reasoning chain, hedging, and conviction level — not just the atomized bullet.
+Your job: Compare perspectives ACROSS SOURCE TYPES — do NOT summarize sequentially, and do NOT
+only compare sell-side sources against each other.
+
+SOURCE BIAS CONTEXT (critical):
+- Sell-side sources (Morgan Stanley, Goldman Sachs, Jefferies, Bernstein, etc.) have structural
+  POSITIVE BIAS. Their compensation is tied to deal flow and buy-side relationships; ratings and
+  price targets systematically skew constructive. Sell-side consensus is a WEAK SIGNAL.
+- Independent sources (Substack, podcasts) have NO structural directional bias. When an
+  independent author raises a concern that sell-side ignores, that divergence is HIGH SIGNAL.
+- Sell-side unanimity is not reassuring — it often reflects shared incentives, not shared facts.
+
+PRIORITY ORDER FOR SYNTHESIS:
+1. FIRST: Surface any point where independent sources (Substack, podcasts) and sell-side DIVERGE.
+   This is the most actionable tension in the briefing. Name the sources explicitly.
+2. SECOND: Surface disagreements BETWEEN sell-side firms on the same name or theme.
+3. THIRD: Surface where all sources (including independent) converge — this is the strongest signal.
 
 WHAT TO SURFACE:
+- Sell-side vs independent divergence — independent source raises concern sell-side ignores, or vice versa
 - Strong conviction — sources expressing high confidence or doubling down
 - Softening tone — language shifting from definitive to hedged ("may", "could", "risks")
-- Hedging language — qualifiers that weaken prior positions
 - Explicit disagreement — sources taking opposite sides on the same topic
 - Emerging narratives — new themes appearing across multiple sources
 - Where analysts talk past each other — same topic, incompatible framing
@@ -339,12 +351,11 @@ WHAT TO SURFACE:
 SENTIMENT DRIFT:
 - If a source's tone has shifted vs prior positioning, call it out
 - If tone has NOT changed, state "No material drift" for that topic
-- If nothing happened for a ticker, state "No Update"
 
 RULES:
 - Write in clear, connected prose (no bullet points, no headers)
 - Build arguments across paragraphs — each paragraph should flow into the next
-- Cite sources by name (e.g., "Jefferies notes...", "Morgan Stanley argues...")
+- Cite sources by name (e.g., "Jefferies notes...", "Substack's [Author] argues...")
 - Do NOT use thesis language: no "bullish", "bearish", "should", "recommend", "buy", "sell"
 - Do NOT add your own opinion or judgment
 - Do NOT repeat claims verbatim — synthesize across them
@@ -388,7 +399,7 @@ def _build_narrative_prompt(
     """Build the user prompt for narrative generation."""
     parts = []
 
-    # Source credibility context
+    # Source context: categorize by type, show credibility + bias notes
     sources_seen = set()
     for c in claims:
         if c.source_citation:
@@ -396,12 +407,22 @@ def _build_narrative_prompt(
             sources_seen.add(source)
 
     if sources_seen:
-        cred_lines = []
-        for s in sorted(sources_seen):
-            score = SOURCE_CREDIBILITY.get(s.lower(), 0.3)
-            cred_lines.append(f"  {s}: credibility {score}")
-        parts.append("Source credibility scores:")
-        parts.extend(cred_lines)
+        sell_side_seen = sorted(s for s in sources_seen if s.lower() in SELL_SIDE_SOURCES)
+        independent_seen = sorted(s for s in sources_seen if s.lower() in INDEPENDENT_SOURCES)
+        other_seen = sorted(s for s in sources_seen
+                            if s.lower() not in SELL_SIDE_SOURCES and s.lower() not in INDEPENDENT_SOURCES)
+
+        parts.append("SOURCE CONTEXT:")
+        if sell_side_seen:
+            parts.append(f"  Sell-side (structural positive bias): {', '.join(sell_side_seen)}")
+            parts.append(f"  → {SOURCE_BIAS_NOTES['sell_side']}")
+        if independent_seen:
+            parts.append(f"  Independent (no structural bias): {', '.join(independent_seen)}")
+            parts.append(f"  → {SOURCE_BIAS_NOTES['independent']}")
+        if other_seen:
+            for s in other_seen:
+                score = SOURCE_CREDIBILITY.get(s.lower(), 0.3)
+                parts.append(f"  {s}: credibility {score}")
         parts.append("")
 
     # ALL claims — include analyst's original prose so LLM has the reasoning chain
@@ -441,10 +462,11 @@ def _build_narrative_prompt(
         parts.append("- Insufficient overlap to detect disagreement")
     parts.append("")
 
-    parts.append("Write a 2-3 paragraph synthesis. Compare perspectives — don't summarize source by source.")
+    parts.append("Write a 2-3 paragraph synthesis. Compare perspectives across SOURCE TYPES — don't summarize source by source.")
+    parts.append("PRIORITY: First surface sell-side vs independent divergences. Then sell-side internal disagreements. Then cross-source convergence.")
     parts.append("You are NOT limited to the detected patterns above. Find any connections, tensions, or emerging themes across the full claim set.")
-    parts.append("Flag conviction strength, softening tone, hedging, and emerging narratives.")
-    parts.append("State 'No material drift' where tone is unchanged. Weigh conflicting views by source credibility.")
+    parts.append("Flag conviction strength, softening tone, hedging. State 'No material drift' where tone is unchanged.")
+    parts.append("Remember: sell-side consensus is a weak signal due to structural positive bias. Independent source agreement with sell-side is stronger.")
 
     return '\n'.join(parts)
 
