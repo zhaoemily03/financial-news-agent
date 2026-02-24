@@ -196,6 +196,10 @@ def classify_chunk(
     if tickers and category != 'tracked_ticker':
         category = 'tracked_ticker'
 
+    # If claimed tracked_ticker but no covered tickers after filtering, downgrade to tmt_sector
+    if category == 'tracked_ticker' and not tickers:
+        category = 'tmt_sector'
+
     # Validate tmt_subtopic
     tmt_subtopic = data.get('tmt_subtopic')
     if category == 'tmt_sector':

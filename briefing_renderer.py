@@ -110,15 +110,6 @@ def _render_section1(claims: List[ClaimOutput]) -> str:
             lines.append(f"  *— {claim.source_citation}*")
         lines.append("")
 
-    # Catch any tickers not in config.ALL_TICKERS
-    for ticker in sorted(by_ticker.keys()):
-        if ticker not in rendered_tickers:
-            lines.append(f"**{ticker}**")
-            for claim in by_ticker[ticker][:MAX_CLAIMS_PER_TICKER]:
-                lines.append(f"- {claim.bullets[0]}")
-                lines.append(f"  *— {claim.source_citation}*")
-            lines.append("")
-
     # --- TMT Sector Sub-section ---
     if sector_claims:
         lines.append("### TMT Sector-Level\n")
