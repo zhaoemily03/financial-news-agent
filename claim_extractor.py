@@ -32,6 +32,7 @@ load_dotenv()
 
 from schemas import Chunk, Document, Claim
 from classifier import ChunkClassification
+import config
 
 # ------------------------------------------------------------------
 # Enums for judgment hooks
@@ -324,10 +325,16 @@ def extract_claim(
     if belief not in BELIEF_PRESSURES:
         belief = "unclear"
 
-    # Ticker
-    ticker = data.get("primary_ticker")
-    if not ticker and classification.tickers:
-        ticker = classification.tickers[0]
+    # Ticker — only accept covered tickers to prevent misattribution.
+    # If the LLM identifies a non-covered company (e.g. "UBER" in an MSFT chunk),
+    # clear the ticker rather than inheriting the chunk's classification ticker.
+    raw_ticker = data.get("primary_ticker")
+    if raw_ticker and raw_ticker in config.ALL_TICKERS:
+        ticker = raw_ticker
+    elif not raw_ticker and classification.tickers:
+        ticker = classification.tickers[0]  # fall back only when LLM found no primary ticker
+    else:
+        ticker = None  # off-coverage company — don't misattribute to a tracked ticker
 
     # Event type
     event_type = data.get("event_type")
