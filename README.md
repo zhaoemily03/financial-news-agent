@@ -6,7 +6,7 @@ A belief-drift detection system for TMT portfolio analysts.
 
 ## System Purpose
 
-This tool exists to **surface belief changes and sentiment drift** — the inputs that actually drive fundamental buy decisions — while keeping breaking news and structural events visible.
+A one-stop-shop for a secondaries hedge fund portfolio manager to see what broke on the tickers they are covering, what broke in the Technology, Media, & Telecommunications (TMT) sector, and to synthesize across multiple information streams. This tool helps the user anticipate how their TMT portfolio should be balanced according to the information streams ingested and incoming disruptions. Surfaces **belief change and sentiment drift** — the inputs that actually drive fundamental buy decisions — while keeping breaking news and structural events visible.
 
 | System Does | Human Does |
 |-------------|------------|
@@ -33,7 +33,7 @@ This means:
 - **Sentiment drift is a first-class output.** When an analyst's confidence softens, you see it.
 - **Contradictions are surfaced, not hidden.** If sources disagree, you see both sides.
 - **Uncertainty is preserved.** "May", "could", "estimates" stay in the output.
-- **Brevity is enforced by design.** <5 pages daily, truncate Tier 3 first.
+- **Brevity is enforced by design.** <5 pages daily, "No Update" lines removed first if over budget.
 - **No conviction imposed.** The system describes; you decide.
 
 What the system will never do:
@@ -48,16 +48,16 @@ What the system will never do:
 ## High-Level Pipeline (V3)
 
 ```
-Collect → Normalize → Pre-filter → Chunk → Classify+Prioritize → Claims+Sort → File Claims → Drift → Synthesize → Render
+Collect → Normalize → Pre-filter → Chunk → Classify+Filter → Claims+Sort → File Claims → Drift → Synthesize → Render
 ```
 
 | Step | Module | AI? | Description |
 |------|--------|-----|-------------|
-| 1. **Collect** | `portal_registry.py` + `macro_news.py` | No | Fetch portals + podcasts + macro RSS |
+| 1. **Collect** | `portal_registry.py` + `podcast_registry.py` + `macro_news.py` + `substack_feishu.py` | No | Fetch portals, podcasts, macro RSS, Substack |
 | 2. **Normalize** | `normalizer.py` | No | Convert to structured `Document` objects |
 | 2b. **Pre-filter** | `run_pipeline.py` | No | Drop non-TMT docs by ticker/keyword before LLM |
 | 3. **Chunk** | `chunker.py` | No | Split into atomic units (~500 tokens) |
-| 4. **Classify+Prioritize** | `classifier.py` | **Yes** | 4-category classification + `filter_irrelevant()` |
+| 4. **Classify+Filter** | `classifier.py` | **Yes** | 4-category classification + `filter_irrelevant()`. Off-coverage `tracked_ticker` chunks downgrade to `tmt_sector`. |
 | 5. **Claims+Sort** | `claim_extractor.py` | **Yes** | Extract atomic claims + `sort_claims_by_priority()` (no cap; high-alert always shown) |
 | 5b. **File Claims** | `claim_tracker.py` | No | Store claims in SQLite for historical tracking |
 | 5c. **Drift Detect** | `drift_detector.py` | No | Compare today's claims against history for belief shifts |
@@ -105,10 +105,10 @@ The V3 briefing uses a **4-section purpose-driven layout**. Claims are routed by
 | 4 | Longitudinal Delta Detection | Drift signals, belief shifts over time | **Phase 2 stub** |
 
 ### Section 1: Objective Breaking News
-- **Tracked tickers**: Iterates ALL tickers from `config.ALL_TICKERS`. Shows "No Update" for tickers with nothing.
+- **Tracked tickers**: Iterates ALL tickers from `config.ALL_TICKERS`. Shows "No Update" for tickers with nothing. Only tickers in `ALL_TICKERS` are rendered — off-coverage company reports are routed to TMT Sector-Level instead.
 - **High-alert events are never missed**: Claims with `event_type` in `HIGH_ALERT_EVENT_TYPES` (earnings, guidance, org, regulation) and `is_descriptive_event=True` are always shown, uncapped, marked with `⚠`. This guarantees M&A, CEO changes, earnings beats/misses, guidance revisions, and regulatory actions are never dropped by the 3-claim cap.
 - **Regular claims**: Capped at 3 per ticker (after high-alert claims are shown), sorted breaking > upcoming > ongoing, contrarian before confirming.
-- **TMT sector**: Groups `tmt_sector` claims by event type.
+- **TMT sector**: Groups `tmt_sector` claims by event type. Receives off-coverage company-specific reports that were downgraded from `tracked_ticker` during classification.
 
 ### Section 2: Synthesis Across Sources
 - LLM-generated narrative prose (not bullets), up to 750 words
@@ -171,10 +171,10 @@ Tier 1: time_sensitivity=breaking + belief_pressure=contradicts_consensus
 
 ## Scope Filtering (V3)
 
-Scope filtering is simplified in V3 to two levels:
+Scope filtering happens at two levels:
 
-1. **Document pre-filter (2b)** — Drops entire documents with no TMT relevance before classification
-2. **Classify + Filter (4)** — Classifier assigns `irrelevant` category; `filter_irrelevant()` drops them. Per-ticker claim cap (max 3) enforces brevity.
+1. **Document pre-filter (2b)** — Drops entire documents with no TMT relevance before classification. Checks title + first chunks for covered tickers or TMT keywords. Podcasts, macro news, and Substack always pass through.
+2. **Classify + Filter (4)** — Classifier assigns `irrelevant` category; `filter_irrelevant()` drops them. If the LLM classifies a chunk as `tracked_ticker` but no covered tickers survive the `ALL_TICKERS` filter, the category is downgraded to `tmt_sector` — ensuring off-coverage company reports route to the sector section, not the ticker list.
 
 Old stages removed: chunk scope (4b), triage (5), claim scope (6b). The classifier's `irrelevant` category replaces all three.
 
@@ -191,7 +191,7 @@ When fewer than 3 claims pass the filter, the system marks it as a "thin day" ra
 The system uses a **PortalRegistry** to manage multiple sell-side research portals. Each portal has its own scraper that inherits from `BaseScraper`, sharing common functionality:
 
 - **Dynamic cookie refresh** — Authenticate once, cookies persist and auto-refresh
-- **Notification-based discovery** — Pulls from "Followed Notifications" (analysts you follow)
+- **Notification-based discovery** — Pulls from "Followed Notifications" (analysts you follow in each portal)
 - **Crash resilience** — One portal failure doesn't crash the entire collection
 - **Unified result format** — All scrapers return the same structure
 
@@ -201,11 +201,11 @@ The system uses a **PortalRegistry** to manage multiple sell-side research porta
 |--------|--------|-------|
 | **Morgan Stanley Matrix** | ✅ Working | Selenium scraper with email verification auth |
 | **Goldman Sachs** | ✅ Working | Selenium scraper |
-| **Bernstein** | ✅ Working | Selenium scraper |
+| **Bernstein** | ✅ Working | Selenium scraper; iterates configured industry verticals |
+| **Arete** | ✅ Working | Selenium scraper; downloads watermarked PDFs from CloudFront |
 | **UBS** | ✅ Working | Selenium scraper |
-| **Arete** | ✅ Working | Selenium scraper |
-| **Jefferies Research** | 👎 Not working | Continues needing manual reauthentication |
 | **Substack** | ✅ Working | Via Feishu Mail API (forwarded emails) |
+| **Jefferies Research** | ❌ Auth issues | SSO cookies expire frequently; needs manual re-auth |
 
 ### Planned Sell-Side Portals
 
@@ -229,8 +229,9 @@ The system uses a **PodcastRegistry** to manage multiple podcast sources. Podcas
 | Podcast | Hosts | Platform | Transcript Source |
 |---------|-------|----------|-------------------|
 | **All-In Podcast** | Chamath, Jason, Sacks, Friedberg | YouTube | Auto-generated captions |
-| **BG2 Pod** | Brad Gerstner, Bill Gurley | Apple/Spotify | Episode descriptions |
-| **Acquired** | Ben Gilbert, David Rosenthal | acquired.fm | Episode descriptions |
+| **a16z Podcast** | Various a16z partners | RSS | Episode descriptions |
+| **Acquired** | Ben Gilbert, David Rosenthal | RSS | Episode descriptions |
+| **BG2 Pod** | Brad Gerstner, Bill Gurley | RSS | Episode descriptions |
 
 **Key Features:**
 - **YouTube podcasts**: Uses `youtube-transcript-api` for auto-generated transcripts (no API key needed)
@@ -244,6 +245,10 @@ The system uses a **PodcastRegistry** to manage multiple podcast sources. Podcas
 2. For RSS-based podcasts, create class extending `RSSPodcast` with `RSS_URL`
 3. Register in `podcast_registry.py`
 4. Enable in `config.py` SOURCES['podcasts']['sources']
+
+### Substack Ingestion
+
+Substack newsletters are forwarded to a Feishu mailbox. `substack_feishu.py` uses a tenant_access_token from an Internal App ("Substack_Ingestion_Agent") to read the inbox, filter for Substack emails, and extract article content. Any forwarded Substack email is auto-ingested — no manual author config needed.
 
 ### Other Sources
 
@@ -283,14 +288,14 @@ cp .env.example .env  # Then edit with your OPENAI_API_KEY
 
 | File | Purpose |
 |------|---------|
-| `config.py` | Tickers, trusted analysts, investment themes, relevance threshold |
+| `config.py` | Tickers, trusted analysts, investment themes, relevance threshold, source toggles |
 | `analyst_config_tmt.py` | TMT-specific topic weights and source credibility |
-| `.env` | API keys (OPENAI_API_KEY) — not tracked in git |
-| `data/cookies.json` | Jefferies session cookies — not tracked in git |
+| `.env` | API keys (`OPENAI_API_KEY`, `FEISHU_APP_ID`, `FEISHU_APP_SECRET`, `FEISHU_MAILBOX`) — not tracked in git |
+| `data/cookies.json` | Portal session cookies — not tracked in git |
 
 ### Cookie Setup
 
-After logging into Jefferies in your browser, export your session cookies to `data/cookies.json`. The scraper uses Shibboleth SSO cookies to authenticate.
+After logging into a portal in your browser, export your session cookies to `data/cookies.json` (keyed by portal name). The scrapers use persisted cookies to authenticate. For Morgan Stanley, set `MS_VERIFY_LINK` in `.env` with the email verification URL on first auth.
 
 ---
 
@@ -325,7 +330,7 @@ Plist files are installed in `~/Library/LaunchAgents/`.
 
 ```
 financial-news-agent/
-├── run_pipeline.py          # V3 pipeline orchestrator (7 stages)
+├── run_pipeline.py          # V3 pipeline orchestrator
 ├── refresh_cookies.py       # Automated cookie refresh (launchd)
 │
 ├── # Document Processing
@@ -336,7 +341,7 @@ financial-news-agent/
 ├── macro_news.py            # RSS macro news collection (Reuters, CNBC)
 │
 ├── # Claims & Drift
-├── claim_extractor.py       # Chunk → atomic claims + cap_claims_per_group() (LLM)
+├── claim_extractor.py       # Chunk → atomic claims + sort_claims_by_priority() (LLM)
 ├── claim_tracker.py         # Historical claim storage (SQLite)
 ├── drift_detector.py        # Cross-time belief shift detection (no LLM)
 │
@@ -355,6 +360,10 @@ financial-news-agent/
 ├── portal_registry.py       # Registry for managing multiple portals
 ├── jefferies_scraper.py     # Jefferies portal scraper
 ├── morgan_stanley_scraper.py # Morgan Stanley Matrix scraper
+├── goldman_scraper.py       # Goldman Sachs scraper
+├── bernstein_scraper.py     # Bernstein Research scraper
+├── ubs_scraper.py           # UBS scraper
+├── arete_scraper.py         # Arete Research scraper
 ├── cookie_manager.py        # Cookie persistence per portal
 ├── report_tracker.py        # SQLite deduplication
 │
@@ -362,13 +371,16 @@ financial-news-agent/
 ├── base_podcast.py          # Abstract base class for podcast handlers
 ├── podcast_registry.py      # Registry for managing multiple podcasts
 ├── youtube_podcast.py       # YouTube-based podcasts (All-In)
-├── rss_podcast.py           # RSS-based podcasts (BG2, Acquired)
+├── rss_podcast.py           # RSS-based podcasts (a16z, BG2, Acquired)
 ├── podcast_tracker.py       # SQLite episode deduplication
+│
+├── # Substack Ingestion
+├── substack_feishu.py       # Feishu Mail API → Substack article extraction
 │
 ├── # Deprecated (kept on disk, removed from pipeline)
 ├── tier_router.py           # Replaced by classifier category routing
 ├── implication_router.py    # No Tier 3 section in V3
-├── triage.py                # Replaced by filter_irrelevant() + claim cap
+├── triage.py                # Replaced by filter_irrelevant()
 │
 ├── # Social Media (Future)
 ├── x_social.py              # X/Twitter feed handler (requires paid API)
@@ -376,6 +388,8 @@ financial-news-agent/
 ├── requirements.txt
 ├── .env                     # API keys (gitignored)
 ├── data/                    # Runtime data (gitignored)
+│   ├── briefings/           # Generated daily briefings (.md)
+│   ├── reports/             # Downloaded PDFs by portal/date
 │   └── cookies/             # Portal session cookies
 └── logs/                    # Pipeline logs (gitignored)
 ```
@@ -391,8 +405,7 @@ META, GOOGL, AMZN, AAPL, BABA, 700.HK, MSFT, CRWD, ZS, PANW, NET, DDOG, SNOW, MD
 NFLX, SPOT, U, APP, RBLX, ORCL, PLTR, SHOP
 
 **Trusted Analysts:**
-- Brent Thill (Jefferies, Internet/Software)
-- Joseph Gallo (Jefferies, Software/Security)
+Dynamically determined by who you follow in each portal ("Followed Notifications"). No manual config needed — follow analysts directly in each portal's UI.
 
 **Investment Themes:**
 - Digital Transformation
@@ -405,26 +418,28 @@ NFLX, SPOT, U, APP, RBLX, ORCL, PLTR, SHOP
 
 - [x] V3 4-section briefing pipeline (Sections 1+2 live, 3+4 stubbed)
 - [x] 4-category classifier (tracked_ticker, tmt_sector, macro, irrelevant)
+- [x] Off-coverage tickers route to TMT Sector-Level, not Tracked Tickers (classifier downgrade + renderer fix)
 - [x] Claims sorted by priority (breaking > contrarian first, no hard cap)
 - [x] High-alert events always shown uncapped in Section 1 (earnings, guidance, M&A, regulatory, leadership, operational metrics)
 - [x] Section 2 LLM narrative synthesis with source credibility, analyst prose context, and secondaries implications subsection
 - [x] Independent sources (Substack, podcast) weighted equally to sell-side in synthesis
-- [x] Jefferies portal scraping (Selenium + SSO cookies) — auth issues
+- [x] Sell-side structural positive bias surfaced explicitly in Section 2 prompt
 - [x] Morgan Stanley Matrix scraping (Selenium + email verification)
 - [x] Goldman Sachs scraping (Selenium)
 - [x] Bernstein scraping (Selenium)
+- [x] Arete scraping (Selenium + CloudFront PDF download)
 - [x] UBS scraping (Selenium)
-- [x] Arete scraping (Selenium)
 - [x] Substack ingestion (Feishu Mail API)
 - [x] PDF text extraction (pdfplumber + PyPDF2 fallback)
 - [x] Document normalization and chunking
-- [x] Podcast ingestion (All-In, BG2 Pod, Acquired)
+- [x] Podcast ingestion (All-In, a16z, BG2 Pod, Acquired)
 - [x] Historical claim tracking (SQLite-backed)
 - [x] Sentiment drift detection (confidence shifts, belief flips, new disagreement)
 - [x] Automated cookie refresh (launchd - runs at login + every 6 hours)
 - [x] Daily briefing automation (launchd - 7 AM daily)
 - [x] Macro news collection (Reuters, CNBC via RSS)
 - [x] Document-level pre-filter (save LLM calls on non-TMT docs)
+- [ ] Jefferies scraping (auth issues — SSO cookies expire frequently)
 - [ ] Section 3: Macro Connections (Phase 2)
 - [ ] Section 4: Longitudinal Delta Detection rendering (Phase 2)
 - [ ] X (Twitter) ingestion (module ready, requires paid API tier)
