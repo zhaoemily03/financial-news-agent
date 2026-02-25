@@ -18,7 +18,6 @@ Usage:
 
 import threading
 from typing import Dict, List, Type, Optional
-from base_scraper import BaseScraper
 import config
 
 # Per-portal timeout (seconds). If a scraper takes longer, it's killed.
@@ -34,9 +33,9 @@ class PortalRegistry:
     """
 
     def __init__(self):
-        self._scrapers: Dict[str, Type[BaseScraper]] = {}
+        self._scrapers: Dict[str, Type] = {}  # BaseScraper or API-based scrapers
 
-    def register(self, portal_name: str, scraper_class: Type[BaseScraper]):
+    def register(self, portal_name: str, scraper_class: Type):
         """
         Register a scraper class for a portal.
 
@@ -260,6 +259,12 @@ def _auto_register():
     try:
         from ubs_scraper import UBSScraper
         registry.register('ubs', UBSScraper)
+    except ImportError:
+        pass
+
+    try:
+        from macquarie_scraper import MacquarieScraper
+        registry.register('macquarie', MacquarieScraper)
     except ImportError:
         pass
 

@@ -10,6 +10,142 @@ Subclasses must implement portal-specific methods:
 - _extract_notifications() - Parse notification items
 - _navigate_to_report(url) - Go to report page
 - _extract_report_content(report) - Extract text/PDF content
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NEW PORTAL INTEGRATION PLAYBOOK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RULE: Never guess API endpoints. Always ask the user to share network
+calls from the browser. This is always faster than trial-and-error.
+
+STEP 0 — CLASSIFY THE PORTAL
+─────────────────────────────
+Ask: "Open DevTools (F12) → Network tab → load the portal homepage.
+      Do you see Fetch/XHR calls with JSON responses, or mostly HTML
+      page loads and JS bundle requests?"
+
+  JSON API responses  →  API-based scraper (see macquarie_scraper.py)
+  Mostly page/JS loads →  Selenium scraper   (extends BaseScraper)
+
+Also ask: "What does the login page look like — email+password,
+  SSO/SAML redirect, or does it just load with your session already?"
+
+  SSO/SAML redirect  →  Cookie seeding only (no automated login)
+  Email+password     →  May automate, but check for CAPTCHA first
+  Already logged in  →  Cookie seeding only
+
+
+STEP 1 — AUTH: WHAT COOKIES/TOKENS ARE NEEDED
+───────────────────────────────────────────────
+Ask: "While logged in, open DevTools → Application tab → Cookies →
+      click the portal domain. Share the Name and (rough) Expiry of
+      each cookie. Don't share the Values yet."
+
+Look for:
+  - Session token (short TTL, e.g. 5–60 min) → auto-rotated by server
+  - Refresh token (long TTL, e.g. 1 year)     → seeds the session
+  - CSRF token (paired with session token)    → must be sent in header
+
+Ask: "When you make any request (e.g. clicking around), does a new
+      auth_token/session cookie appear in Set-Cookie response headers?"
+  Yes → server auto-rotates; call any GET on init to get fresh token
+  No  → static session cookie; just load and reuse until expiry
+
+For 2FA portals: "Does the 2FA send a link or a code?"
+  Link → can automate via MS_VERIFY_LINK pattern (see morgan_stanley_scraper.py)
+  Code → cannot automate; use cookie seeding only
+
+
+STEP 2 — FOLLOWED ENTITIES: HOW DOES THE PORTAL KNOW WHAT TO SHOW YOU
+────────────────────────────────────────────────────────────────────────
+Ask: "Clear the Network tab (🚫), then click on your
+      Notifications / Preferences / Watchlist / My Feed section.
+      Share the first Fetch/XHR request that returns a list of
+      analysts or companies: URL + Method + Payload + Response (20 lines)."
+
+What to look for in the response:
+  - An array of followed entities with IDs → use as input to listing endpoint
+  - A pre-built feed of recent items       → this IS the listing endpoint (go to Step 4)
+  - A list of report IDs only              → need a separate detail endpoint
+
+
+STEP 3 — LISTING: HOW TO GET RECENT REPORTS
+─────────────────────────────────────────────
+Ask: "Clear the Network tab, then navigate to your main reports feed
+      or recent publications page. Share the Fetch/XHR request that
+      returns a list of reports with titles and dates:
+      URL + Method + Payload + Response (20 lines)."
+
+If no single listing endpoint exists (like Macquarie):
+  Ask: "Click on one followed analyst to see their publications.
+        Share the Fetch/XHR request that loaded 'Publications by [Name]':
+        URL + Method + Payload + Response (20 lines)."
+  → Then iterate that endpoint per followed entity from Step 2.
+
+Key fields to confirm in the response:
+  - Report ID (to build detail/content URLs)
+  - Publication date (for date filtering)
+  - Title
+  - Analyst name(s)
+  - Any direct HTML or PDF paths (may skip Step 4 entirely)
+
+
+STEP 4 — CONTENT: HOW TO GET REPORT TEXT
+──────────────────────────────────────────
+Ask: "Click on one report to open it. In the Network tab, share:
+      (a) Any request whose response is HTML report content
+          (URL + first 5 lines of response)
+      (b) Any request that downloads a PDF
+          (URL only — don't share the PDF bytes)"
+
+Common patterns:
+  Direct HTML:  GET /api/static/file/publications/{id}/index.html
+  PDF download: GET /api/static/file/publications/{id}/{hash}.pdf
+  PDF via JS:   Selenium scroll-to-reveal then intercept download URL
+
+If the listing response (Step 3) already includes mainFileName/pdfFileName
+fields → no separate content request needed.
+
+
+STEP 5 — PAGINATION (IF NEEDED)
+─────────────────────────────────
+Ask: "Scroll down on the feed to load more reports. Does a new
+      network request appear? If so, share its URL + Payload."
+
+Typical patterns:
+  page=0, page=1, ... → offset pagination
+  cursor/token field  → cursor pagination
+  No new request      → all results loaded upfront (use size= param)
+
+
+IMPLEMENTATION CHECKLIST
+──────────────────────────
+API-based (no Selenium):
+  [ ] Create {portal}_scraper.py (do NOT extend BaseScraper)
+  [ ] Implement _load_cookies(), _refresh_session(), _persist_cookies()
+  [ ] Implement _fetch_followed_entities()  (Step 2 endpoint)
+  [ ] Implement _search_publications_for_entity()  (Step 3 endpoint)
+  [ ] Implement _fetch_notifications()  (orchestrates 2+3)
+  [ ] Implement _extract_content()  (Step 4, with bullet fallback)
+  [ ] Register in portal_registry.py
+  [ ] Add to config.py SOURCES (enabled: False until tested)
+  [ ] Seed cookies, run standalone test, then enable
+
+Selenium-based (extends BaseScraper):
+  [ ] Create {portal}_scraper.py extending BaseScraper
+  [ ] Define PORTAL_NAME, CONTENT_URL, PDF_STORAGE_DIR
+  [ ] Implement _check_authentication()
+  [ ] Implement _navigate_to_notifications()
+  [ ] Implement _extract_notifications()
+  [ ] Implement _navigate_to_report(url)
+  [ ] Implement _extract_report_content(report)
+  [ ] Register in portal_registry.py
+  [ ] Add to config.py SOURCES
+
+Reference implementations:
+  API-based:      macquarie_scraper.py
+  Selenium-based: morgan_stanley_scraper.py, bernstein_scraper.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import requests

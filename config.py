@@ -115,7 +115,7 @@ SOURCES = {
         'scraper_class': 'BernsteinScraper',
     },
     'arete': {
-        'enabled': False,  # Not yet tested
+        'enabled': True,
         'portal_url': 'https://portal.arete.net/',
         'login_required': True,
         'uses_followed_notifications': False,  # Uses "My Research" on home page
@@ -129,6 +129,14 @@ SOURCES = {
         'uses_followed_notifications': False,  # Uses per-ticker search
         'max_reports': 30,
         'scraper_class': 'UBSScraper',
+    },
+    'macquarie': {
+        'enabled': True,
+        'portal_url': 'https://www.macquarieinsights.com/overview',
+        'login_required': True,
+        'uses_followed_notifications': True,
+        'max_reports': 20,
+        'scraper_class': 'MacquarieScraper',
     },
     # Non-portal sources (separate ingestion pipeline)
     'substack': {
