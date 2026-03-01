@@ -19,6 +19,7 @@ Usage:
 import threading
 from typing import Dict, List, Type, Optional
 import config
+from base_scraper import BaseScraper
 
 # Per-portal timeout (seconds). If a scraper takes longer, it's killed.
 PORTAL_TIMEOUT = 300  # 5 minutes default
@@ -115,7 +116,7 @@ class PortalRegistry:
     def collect_from(
         self,
         portal_names: List[str],
-        days: int = 7,
+        days: int = 2,
         max_per_portal: int = 20,
         headless: bool = True,
         timeout: int = PORTAL_TIMEOUT,
@@ -183,7 +184,7 @@ class PortalRegistry:
 
     def collect_all(
         self,
-        days: int = 7,
+        days: int = 2,
         max_per_portal: int = 20,
         headless: bool = True
     ) -> Dict:
@@ -298,7 +299,7 @@ if __name__ == "__main__":
 
     # Test 3: Collect from enabled portals
     print("\n[3/3] Collecting from enabled portals...")
-    result = registry.collect_all(days=7, max_per_portal=5, headless=False)
+    result = registry.collect_all(days=2, max_per_portal=5, headless=False)
 
     reports = result.get('reports', [])
     failures = result.get('failures', [])

@@ -6,7 +6,7 @@ Instructions for Claude when working on this codebase.
 
 ## What This System Does
 
-Surfaces **belief change and sentiment drift** — the inputs that drive fundamental buy decisions — while keeping breaking news visible. This is NOT a summarization tool.
+A one-stop-shop for a secondaries hedge fund portfolio manager to see what broke on the tickers they are covering, what broke in the Technology, Media, & Telecommunications (TMT) sector, and to synthesize across multiple information streams. This tool helps the user anticipate how their TMT portfolio should be balanced according to the information streams ingested and incoming disruptions. Surfaces **belief change and sentiment drift** — the inputs that drive fundamental buy decisions — while keeping breaking news visible. This is NOT just a summarization tool.
 
 The system helps analysts:
 - Track belief evolution across sources over time
@@ -21,14 +21,14 @@ The system helps analysts:
 **Professional TMT analyst** (internet + software focus)
 - Time-constrained: <15 minutes to consume daily briefing
 - Wants to **challenge ideas**, not read summaries
-- Forms their own conviction; does not want AI opinions
+- Forms their own conviction; AI-generated opionions are clearly labeled
 - Covers: META, GOOGL, AMZN, AAPL, MSFT, CRWD, ZS, PANW, NET, DDOG, SNOW, MDB
 
 ---
 
 ## Core Design Principles (Non-Negotiable)
 
-1. **Change > State** — Surface what *changed*, not what *is*
+1. **Comprehensiveness & Reliability** — this tool never omits information that is financially material
 2. **Beliefs > Documents** — Track claims and confidence over time
 3. **Judgment Lives With Humans** — AI surfaces pressure on beliefs, not conclusions
 4. **Brevity Enables Thinking** — <5 pages, <15 minutes
@@ -133,6 +133,7 @@ See README.md for the full pipeline with AI/non-AI markers.
 | `claim_tracker.py` | Historical claim storage (SQLite) | No |
 | `drift_detector.py` | Cross-time belief shift detection | No |
 | `tier2_synthesizer.py` | Section 2 narrative synthesis (agreement/disagreement) | **Yes** |
+| `section3_synthesizer.py` | Section 3 macro → TMT linkage narrative | **Yes** |
 | `briefing_renderer.py` | V3 4-section <5 page output | No |
 | `analyst_config_tmt.py` | Category/subtopic weights, source credibility | No |
 | `scope_filter.py` | Sector/ticker/analyst scoping | No |
@@ -163,8 +164,8 @@ This is deterministic — no LLM calls. It compares `confidence_level` and `beli
 |---|---------|---------|--------|
 | 1 | Objective Breaking News | Per-ticker updates + TMT sector-level. High-alert events always shown uncapped (⚠). | **Live** |
 | 2 | Synthesis Across Sources | LLM narrative: sell-side vs independent divergence first, then internal disagreements | **Live** |
-| 3 | Macro Connections | Macro claims + TMT linkage | **Phase 2 stub** |
-| 4 | Longitudinal Delta Detection | Drift signals, belief shifts over time | **Phase 2 stub** |
+| 3 | Macro Connections | Deduplicated macro claims + LLM TMT linkage narrative (`section3_synthesizer.py`) | **Live** |
+| 4 | Longitudinal Delta Detection | Drift signals, belief shifts over time — deterministic, no LLM | **Live** |
 
 **Section 1 guarantees:** High-alert events (`HIGH_ALERT_EVENT_TYPES` in `analyst_config_tmt.py`) are never filtered and always shown uncapped, marked ⚠. Regular claims are capped at 3 per ticker after filling high-alert slots. "No Update" shown for tickers with no claims. Routes claims by `category`: `tracked_ticker` → per-ticker groups, `tmt_sector` → sector sub-section.
 
@@ -330,8 +331,8 @@ The system uses a `PodcastRegistry` to manage multiple podcast sources. Podcasts
 - [x] Automated cookie refresh (launchd)
 - [x] Macro news collection (Reuters, CNBC via RSS)
 - [x] Document-level pre-filter (save LLM calls on non-TMT docs)
-- [ ] Section 3: Macro Connections (Phase 2)
-- [ ] Section 4: Longitudinal Delta Detection rendering (Phase 2)
+- [x] Section 3: Macro Connections (deduplicated macro claims + LLM TMT linkage via `section3_synthesizer.py`)
+- [x] Section 4: Longitudinal Delta Detection rendering (deterministic, live)
 - [ ] End-to-end pipeline integration test
 - [x] Substack ingestion (Feishu Mail API)
 - [ ] Email delivery

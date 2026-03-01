@@ -10,6 +10,7 @@ Usage:
 import os
 import sys
 import json
+import time
 from datetime import datetime, date
 from typing import List, Dict, Tuple, Optional
 from dotenv import load_dotenv
@@ -23,8 +24,11 @@ from chunker import chunk_document, estimate_tokens
 from classifier import classify_chunks, filter_irrelevant, ChunkClassification
 from claim_extractor import extract_claims, sort_claims_by_priority, ClaimOutput
 from tier2_synthesizer import synthesize_section2, Section2Synthesis
+from section3_synthesizer import synthesize_section3, Section3Synthesis, filter_macro_claims_by_tmt_relevance
 from briefing_renderer import render_briefing, count_words, count_pages
 from config import TRUSTED_ANALYSTS, ALL_TICKERS, MACRO_NEWS, SOURCES
+from macro_news import MACRO_KEYWORDS
+from analyst_config_tmt import SELL_SIDE_SOURCES
 
 # Sentiment Drift Detection
 from claim_tracker import ClaimTracker
@@ -297,6 +301,16 @@ Jefferies LLC is a registered broker-dealer.
 # Pipeline Stages
 # ------------------------------------------------------------------
 
+def _retry_once(fn, *args, delay: int = 3, **kwargs):
+    """Call fn(*args, **kwargs); on any exception wait and try once more. Second failure propagates."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as first_err:
+        print(f"  ↻ Retrying after error: {str(first_err)[:80]}")
+        time.sleep(delay)
+        return fn(*args, **kwargs)
+
+
 def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
     """Stage 1: Collect reports from portals + podcasts (fallback to sample)."""
     print("\n" + "=" * 60)
@@ -350,7 +364,7 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
         enabled_podcasts = podcast_registry.list_enabled()
         if enabled_podcasts:
             print(f"\n  Enabled podcasts: {', '.join(enabled_podcasts)}")
-            result = podcast_registry.collect_all(days=7, max_per_podcast=2)
+            result = _retry_once(podcast_registry.collect_all, days=7, max_per_podcast=2)
             episodes = result.get('episodes', [])
             podcast_failures = result.get('failures', [])
 
@@ -366,7 +380,7 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
     except ImportError:
         print("  Podcasts: module not available")
     except Exception as e:
-        print(f"  ⚠ Podcast collection failed: {e}")
+        print(f"  ⚠ Podcast collection failed after retry: {e}")
         source_failures.append(f"Podcasts (error: {str(e)[:50]})")
 
     # 1c: Collect macro news via RSS
@@ -375,7 +389,8 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
             from macro_news import collect_macro_news
 
             print(f"\n  Collecting macro news...")
-            macro_reports = collect_macro_news(
+            macro_reports = _retry_once(
+                collect_macro_news,
                 max_articles=MACRO_NEWS.get('max_articles', 6),
                 days=MACRO_NEWS.get('days_lookback', 1),
             )
@@ -388,7 +403,7 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
         except ImportError:
             print("  Macro news: module not available")
         except Exception as e:
-            print(f"  ⚠ Macro news collection failed: {e}")
+            print(f"  ⚠ Macro news collection failed after retry: {e}")
             source_failures.append(f"Macro news (error: {str(e)[:50]})")
     else:
         print("  Macro news: disabled in config")
@@ -400,7 +415,8 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
             from substack_feishu import collect_substack
 
             print(f"\n  Collecting Substack newsletters...")
-            substack_reports = collect_substack(
+            substack_reports = _retry_once(
+                collect_substack,
                 days=substack_config.get('days_lookback', 5),
             )
             if substack_reports:
@@ -412,7 +428,7 @@ def stage_1_collect(stats: PipelineStats) -> Tuple[List[Dict], List[str]]:
         except ImportError:
             print("  Substack: module not available")
         except Exception as e:
-            print(f"  ⚠ Substack collection failed: {e}")
+            print(f"  ⚠ Substack collection failed after retry: {e}")
             source_failures.append(f"Substack (error: {str(e)[:50]})")
     else:
         print("  Substack: disabled in config")
@@ -478,6 +494,15 @@ TMT_PREFILTER_KEYWORDS = [
     'gaming', 'fintech', 'payments', 'zero trust', 'endpoint',
 ]
 
+# Title-level signals that indicate traditional auto/industrial content with no meaningful TMT angle.
+# Applied only when no tracked ticker is present — prevents auto sector reports from passing on
+# generic 'tech' or 'digital' keywords alone.
+AUTO_SECTOR_TITLE_TERMS = [
+    'auto dealer', 'auto dealership', 'car dealer', 'dealership scorecard',
+    'auto parts', 'auto supplier', 'auto monitor', 'vehicle sales',
+    'auto scorecard', 'dealer scorecard',
+]
+
 PASSTHROUGH_SOURCES = {'podcast', 'macro_news', 'substack'}
 
 
@@ -515,11 +540,17 @@ def stage_2b_prefilter(
 
         has_tmt_keyword = any(kw.lower() in text_to_scan_lower for kw in TMT_PREFILTER_KEYWORDS)
 
-        if has_ticker or has_tmt_keyword:
+        # Drop auto/industrial sector docs that have no tracked ticker — they pass on
+        # generic TMT keywords ('tech', 'digital') but carry no portfolio-relevant signal.
+        title_lower = (doc.title or '').lower()
+        is_auto_sector = not has_ticker and any(t in title_lower for t in AUTO_SECTOR_TITLE_TERMS)
+
+        if (has_ticker or has_tmt_keyword) and not is_auto_sector:
             kept.append((doc, chunks))
         else:
+            reason = "auto sector" if is_auto_sector else "non-TMT"
             dropped.append(doc.title)
-            print(f"  ✗ Dropped: {doc.title[:60]}")
+            print(f"  ✗ Dropped ({reason}): {doc.title[:60]}")
 
     stats.log("prefilter", len(normalized), len(kept),
               f"dropped {len(dropped)} non-TMT docs")
@@ -556,14 +587,13 @@ def stage_3_chunk(normalized: List[Tuple[Document, List[Chunk]]], stats: Pipelin
 def stage_4_classify_and_filter(
     chunked: List[Tuple[Document, List[Chunk]]],
     stats: PipelineStats,
+    tracked_tickers: Optional[List[str]] = None,
+    investment_themes: Optional[List[dict]] = None,
 ) -> List[Tuple[Document, List[Chunk], List[ChunkClassification]]]:
     """Stage 4: Classify + Filter — LLM tagging then drop irrelevant."""
     print("\n" + "=" * 60)
     print("[4/7] CLASSIFY + FILTER — LLM Tagging → Drop Irrelevant")
     print("=" * 60)
-
-    from openai import OpenAI
-    client = OpenAI()
 
     results = []
     total_chunks = 0
@@ -572,7 +602,11 @@ def stage_4_classify_and_filter(
 
     for doc, chunks in chunked:
         print(f"  Classifying {len(chunks)} chunks from: {doc.title[:40]}...")
-        classifications = classify_chunks(chunks, doc, client)
+        classifications = classify_chunks(
+            chunks, doc,
+            tracked_tickers=tracked_tickers,
+            investment_themes=investment_themes,
+        )
 
         # Filter irrelevant
         kept_chunks, kept_clfs, discarded = filter_irrelevant(chunks, classifications)
@@ -582,6 +616,21 @@ def stage_4_classify_and_filter(
 
         if discarded:
             print(f"    Filtered: {len(chunks)} → {len(kept_chunks)} ({discarded} irrelevant dropped)")
+
+        # Keyword gate: sell-side macro chunks must match MACRO_KEYWORDS before claim extraction.
+        # RSS/podcast/Substack are exempt — already keyword-filtered at collection.
+        if doc.source in SELL_SIDE_SOURCES:
+            text_lower = lambda ch: ch.text.lower()
+            pairs = [
+                (ch, cl) for ch, cl in zip(kept_chunks, kept_clfs)
+                if cl.category != 'macro' or any(kw in text_lower(ch) for kw in MACRO_KEYWORDS)
+            ]
+            macro_gated = len(kept_chunks) - len(pairs)
+            if macro_gated:
+                kept_chunks = [p[0] for p in pairs]
+                kept_clfs   = [p[1] for p in pairs]
+                total_kept -= macro_gated
+                print(f"    Macro keyword gate: {macro_gated} sell-side macro chunk(s) dropped (no TMT keywords)")
 
         if kept_chunks:
             results.append((doc, kept_chunks, kept_clfs))
@@ -595,20 +644,23 @@ def stage_4_classify_and_filter(
 def stage_5_extract_claims(
     classified: List[Tuple[Document, List[Chunk], List[ChunkClassification]]],
     stats: PipelineStats,
-) -> List[ClaimOutput]:
-    """Stage 5: Extract claims + sort by priority (no cap)."""
+) -> Tuple[List[ClaimOutput], List[str]]:
+    """Stage 5: Extract claims + sort by priority (no cap).
+
+    Returns:
+        (sorted_claims, boilerplate_warnings) — warnings for source docs where
+        chunks were skipped after two boilerplate-detection attempts.
+    """
     print("\n" + "=" * 60)
     print("[5/7] CLAIMS — Extract Atomic Claims + Sort by Priority")
     print("=" * 60)
 
-    from openai import OpenAI
-    client = OpenAI()
-
     all_claims = []
+    boilerplate_warnings: List[str] = []
 
     for doc, chunks, clfs in classified:
         print(f"  Extracting claims from: {doc.title[:40]}...")
-        doc_claims = extract_claims(chunks, clfs, doc, client)
+        doc_claims = extract_claims(chunks, clfs, doc, out_warnings=boilerplate_warnings)
         all_claims.extend(doc_claims)
 
     # Sort by priority within groups — no cap
@@ -618,7 +670,7 @@ def stage_5_extract_claims(
     stats.log("claims", sum(len(c) for _, c, _ in classified), len(sorted_claims),
               f"{total_bullets} bullets, all claims kept")
     print(f"\n  ✓ Extracted {len(sorted_claims)} claims (all kept, sorted by priority)")
-    return sorted_claims
+    return sorted_claims, boilerplate_warnings
 
 
 def stage_5b_file_claims(
@@ -644,9 +696,9 @@ def stage_5c_drift_detection(
     claims: List[ClaimOutput],
     stats: PipelineStats,
 ) -> Optional[DriftReport]:
-    """Stage 5c: Drift detection — compare today vs history (Phase 2 rendering)."""
+    """Stage 5c: Multi-window drift detection — 7d/30d/90d belief change comparison."""
     print("\n" + "=" * 60)
-    print("[5c] DRIFT DETECTION — Belief Changes (rendering deferred to Phase 2)")
+    print("[5c] DRIFT DETECTION — Multi-Window Belief Change Detection")
     print("=" * 60)
 
     if not DRIFT_DETECTION.get('enabled', False):
@@ -654,14 +706,22 @@ def stage_5c_drift_detection(
         return None
 
     tracker = ClaimTracker()
-    lookback = DRIFT_DETECTION.get('lookback_days', 7)
-    prior_claims = tracker.get_prior_claims(days=lookback)
-    print(f"  Prior claims (last {lookback} days): {len(prior_claims)}")
+
+    # Prune claims older than retention window (bounds DB to ~2 earnings cycles)
+    max_retention = DRIFT_DETECTION.get('max_retention_days', 180)
+    removed = tracker.cleanup_old_claims(max_age_days=max_retention)
+    if removed:
+        print(f"  ✓ Pruned {removed} claims older than {max_retention} days")
+
+    windows = DRIFT_DETECTION.get('analysis_windows', [7, 30, 90])
+    tracker_stats = tracker.get_stats()
+    print(f"  Historical claims: {tracker_stats['total_claims']} across {tracker_stats['days_tracked']} days")
+    print(f"  Analysis windows: {windows}d")
 
     drift_report = None
-    if prior_claims:
+    if tracker_stats['total_claims'] > 0:
         print("  Detecting belief drift...")
-        drift_report = detect_drift(claims, tracker, lookback_days=lookback)
+        drift_report = detect_drift(claims, tracker, lookback_days=max(windows), windows=windows)
         print(f"    {drift_report.summary()}")
 
         if drift_report.high_severity:
@@ -669,10 +729,10 @@ def stage_5c_drift_detection(
             for s in drift_report.high_severity[:3]:
                 print(f"      - [{s.drift_type}] {s.description[:70]}")
     else:
-        print("  No historical data yet — first run builds the baseline")
+        print("  No historical data yet — baseline builds after first run")
 
     signal_count = len(drift_report.signals) if drift_report else 0
-    stats.log("drift", len(claims), signal_count, f"{len(prior_claims)} prior claims")
+    stats.log("drift", len(claims), signal_count, f"{tracker_stats['total_claims']} historical claims")
 
     return drift_report
 
@@ -681,30 +741,38 @@ def stage_6_synthesize_and_render(
     claims: List[ClaimOutput],
     stats: PipelineStats,
     source_failures: List[str] = None,
+    drift_report: Optional[DriftReport] = None,
 ) -> str:
-    """Stage 6: Synthesize Section 2 + Render 4-section briefing."""
+    """Stage 6: Synthesize Sections 2+3 + Render 4-section briefing."""
     print("\n" + "=" * 60)
     print("[6/7] SYNTHESIZE + RENDER — V3 4-Section Briefing")
     print("=" * 60)
 
-    # Section 2 synthesis (LLM narrative)
+    # Section 2 synthesis (LLM narrative: agreement/disagreement across sources)
     print("  Synthesizing Section 2 (agreement/disagreement narrative)...")
-    from openai import OpenAI
-    try:
-        client = OpenAI()
-    except Exception:
-        client = None
-
-    section2 = synthesize_section2(claims, client=client)
+    section2 = synthesize_section2(claims)
     print(f"    Agreements: {len(section2.agreements)}")
     print(f"    Disagreements: {len(section2.disagreements)}")
     print(f"    Narrative: {len(section2.narrative)} chars")
 
-    # Render briefing
+    # Section 3 synthesis (LLM narrative: macro → TMT linkages)
+    # LLM filter selects claims with genuine TMT-disruption potential (replaces deterministic sort key).
+    # Cap at 8 as a safety ceiling after filtering.
+    _all_macro = [c for c in claims if c.category == 'macro']
+    macro_claims = filter_macro_claims_by_tmt_relevance(_all_macro)[:8]
+    print(f"  Synthesizing Section 3 ({len(_all_macro)} macro claims → {len(macro_claims)} TMT-relevant → LLM linkages)...")
+    section3 = synthesize_section3(macro_claims)
+    print(f"    Narrative: {len(section3.narrative)} chars")
+
+    # Render briefing (Section 4 uses drift_report directly — no LLM)
+    # Pass the same capped macro_claims used for synthesis → display and narrative are coherent
     print("  Rendering 4-section briefing...")
     briefing = render_briefing(
         claims, section2,
         briefing_date=date.today(),
+        section3_synthesis=section3,
+        drift_report=drift_report,
+        macro_claims=macro_claims,
     )
 
     # Append source failure notice
@@ -729,12 +797,30 @@ def stage_6_synthesize_and_render(
 # Main Pipeline
 # ------------------------------------------------------------------
 
-def run_pipeline():
-    """Execute full end-to-end V3 pipeline."""
+def run_pipeline(user_config: Optional[Dict] = None):
+    """Execute full end-to-end V3 pipeline.
+
+    Args:
+        user_config: Optional per-user config dict (from user_db). Keys used:
+            - 'tickers_primary': list of primary tickers
+            - 'tickers_watchlist': list of watchlist tickers
+            - 'investment_themes': list of {name, keywords} dicts
+            If None, falls back to global config.py values.
+    """
     print("\n" + "=" * 60)
     print("  FINANCIAL NEWS AGENT — V3 Pipeline")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
+
+    # Extract per-user overrides (or None to use global config defaults)
+    tracked_tickers = None
+    investment_themes = None
+    if user_config:
+        primary = user_config.get('tickers_primary', [])
+        watchlist = user_config.get('tickers_watchlist', [])
+        if primary or watchlist:
+            tracked_tickers = list(set(primary + watchlist))
+        investment_themes = user_config.get('investment_themes') or None
 
     _reset_today_dedup()
     stats = PipelineStats()
@@ -755,14 +841,18 @@ def run_pipeline():
     chunked = stage_3_chunk(filtered, stats)
 
     # Stage 4: Classify + Filter irrelevant (replaces old classify → scope_chunks → triage)
-    classified = stage_4_classify_and_filter(chunked, stats)
+    classified = stage_4_classify_and_filter(
+        chunked, stats,
+        tracked_tickers=tracked_tickers,
+        investment_themes=investment_themes,
+    )
 
     if not classified:
         print("\n✗ All chunks classified as irrelevant. No content for briefing.")
         return None
 
     # Stage 5: Extract claims + per-group cap (max 3 per ticker/subtopic/macro)
-    claims = stage_5_extract_claims(classified, stats)
+    claims, boilerplate_warnings = stage_5_extract_claims(classified, stats)
 
     if not claims:
         print("\n✗ No claims extracted. No content for briefing.")
@@ -774,8 +864,11 @@ def run_pipeline():
     # Stage 5c: Drift detection (runs + files, rendering deferred to Phase 2)
     drift_report = stage_5c_drift_detection(claims, stats)
 
+    # Merge boilerplate warnings into source_failures for unified notice at briefing bottom
+    all_failures = (source_failures or []) + [f"Extraction warning: {w}" for w in boilerplate_warnings]
+
     # Stage 6: Synthesize + Render
-    briefing = stage_6_synthesize_and_render(claims, stats, source_failures)
+    briefing = stage_6_synthesize_and_render(claims, stats, all_failures, drift_report=drift_report)
 
     # Print summary
     print(stats.summary())

@@ -22,6 +22,7 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
+from collections import defaultdict
 
 from claim_extractor import ClaimOutput
 
@@ -282,6 +283,60 @@ class ClaimTracker:
         rows = cursor.fetchall()
         conn.close()
         return [self._row_to_claim(row) for row in rows]
+
+    def get_all_tickers_with_history(
+        self,
+        days: int = 90,
+        exclude_today: bool = True,
+    ) -> Dict[str, List['HistoricalClaim']]:
+        """
+        Return all tickers that have claims in the lookback window, not limited
+        to today's tickers. Required for correct attention decay detection —
+        if we only fetch prior claims for today's tickers, tickers that have gone
+        quiet are invisible to the decay detector.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        today = datetime.now().strftime('%Y-%m-%d')
+
+        if exclude_today:
+            cursor.execute('''
+                SELECT * FROM claims
+                WHERE ticker IS NOT NULL AND date_stored >= ? AND date_stored < ?
+                ORDER BY ticker, date_stored DESC
+            ''', (cutoff, today))
+        else:
+            cursor.execute('''
+                SELECT * FROM claims
+                WHERE ticker IS NOT NULL AND date_stored >= ?
+                ORDER BY ticker, date_stored DESC
+            ''', (cutoff,))
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        result = defaultdict(list)
+        for row in rows:
+            claim = self._row_to_claim(row)
+            if claim.ticker:
+                result[claim.ticker].append(claim)
+        return dict(result)
+
+    def cleanup_old_claims(self, max_age_days: int = 180) -> int:
+        """
+        Remove claims older than max_age_days. Returns count removed.
+        Call at pipeline startup to bound DB size to two earnings cycles.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=max_age_days)).strftime('%Y-%m-%d')
+        cursor.execute('DELETE FROM claims WHERE date_stored < ?', (cutoff,))
+        removed = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return removed
 
     def get_prior_claims(
         self,

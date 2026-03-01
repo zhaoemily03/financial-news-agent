@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+{% block title %}Settings — Daily Briefing{% endblock %}
+
+{% block content %}
+<div class="settings-page">
+  <h2>Settings</h2>
+
+  <!-- ============================================================
+       TICKERS
+  ============================================================ -->
+  <section class="settings-section">
+    <h3>Tracked Tickers</h3>
+    <p class="muted">Primary tickers appear in Section 1 even with no updates. Watchlist tickers only appear when there is new coverage.</p>
+
+    <div class="ticker-columns">
+
+      <!-- Primary -->
+      <div class="ticker-group">
+        <h4>Primary</h4>
+        <div class="ticker-tags">
+          {% for ticker in tickers_primary %}
+          <form method="post" action="{{ url_for('views.settings_tickers') }}" style="display:inline">
+            <input type="hidden" name="action" value="remove">
+            <input type="hidden" name="ticker" value="{{ ticker }}">
+            <input type="hidden" name="tier" value="primary">
+            <button type="submit" class="tag">{{ ticker }} &times;</button>
+          </form>
+          {% endfor %}
+        </div>
+        <form method="post" action="{{ url_for('views.settings_tickers') }}" class="add-ticker-form">
+          <input type="hidden" name="action" value="add">
+          <input type="hidden" name="tier" value="primary">
+          <input type="text" name="ticker" placeholder="Add ticker (e.g. NVDA)" maxlength="10"
+                 class="ticker-input" oninput="validateTicker(this)">
+          <button type="submit" class="btn-small">Add</button>
+        </form>
+      </div>
+
+      <!-- Watchlist -->
+      <div class="ticker-group">
+        <h4>Watchlist</h4>
+        <div class="ticker-tags">
+          {% for ticker in tickers_watchlist %}
+          <form method="post" action="{{ url_for('views.settings_tickers') }}" style="display:inline">
+            <input type="hidden" name="action" value="remove">
+            <input type="hidden" name="ticker" value="{{ ticker }}">
+            <input type="hidden" name="tier" value="watchlist">
+            <button type="submit" class="tag tag-watchlist">{{ ticker }} &times;</button>
+          </form>
+          {% endfor %}
+        </div>
+        <form method="post" action="{{ url_for('views.settings_tickers') }}" class="add-ticker-form">
+          <input type="hidden" name="action" value="add">
+          <input type="hidden" name="tier" value="watchlist">
+          <input type="text" name="ticker" placeholder="Add ticker (e.g. PLTR)" maxlength="10"
+                 class="ticker-input" oninput="validateTicker(this)">
+          <button type="submit" class="btn-small">Add</button>
+        </form>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============================================================
+       INVESTMENT THEMES
+  ============================================================ -->
+  <section class="settings-section">
+    <h3>Investment Themes</h3>
+    <p class="muted">Up to 5 themes. Keywords determine what content is classified as relevant to your briefing.</p>
+
+    {% for theme in investment_themes %}
+    <div class="theme-card">
+      <div class="theme-header">
+        <strong>{{ theme.name }}</strong>
+        <form method="post" action="{{ url_for('views.settings_themes_remove') }}" style="display:inline">
+          <input type="hidden" name="theme_name" value="{{ theme.name }}">
+          <button type="submit" class="btn-remove-sm">Remove</button>
+        </form>
+      </div>
+      <div class="theme-keywords">
+        {% for kw in theme.keywords %}
+        <span class="keyword-tag">{{ kw }}</span>{% if not loop.last %}, {% endif %}
+        {% endfor %}
+        {% if not theme.keywords %}
+        <span class="muted" style="font-size:0.85em">No keywords set</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+
+    {% if investment_themes|length < 5 %}
+    <div class="add-theme-form" style="margin-top:16px">
+      <h4 style="margin-bottom:8px">Add Theme</h4>
+      <form method="post" action="{{ url_for('views.settings_themes_add') }}" id="add-theme-form">
+        <div class="form-row" style="margin-bottom:8px">
+          <input type="text" name="theme_name" id="theme-name-input"
+                 placeholder="Theme name (e.g. AI Infrastructure)" required
+                 style="width:100%;max-width:400px">
+        </div>
+        <div class="form-row" style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <input type="text" name="keywords" id="theme-keywords-input"
+                 placeholder="Keywords, comma-separated (or use Suggest)"
+                 style="flex:1;max-width:400px">
+          <button type="button" id="suggest-keywords-btn" class="btn-small">Suggest keywords</button>
+          <span id="suggest-status" style="font-size:0.85em;color:#888"></span>
+        </div>
+        <button type="submit" class="btn-primary">Add Theme</button>
+      </form>
+    </div>
+    {% else %}
+    <p class="muted" style="margin-top:12px">Maximum 5 themes reached. Remove a theme to add a new one.</p>
+    {% endif %}
+  </section>
+
+  <!-- ============================================================
+       SOURCES
+  ============================================================ -->
+  <form method="post" action="{{ url_for('views.settings_sources') }}">
+  <section class="settings-section">
+    <h3>Information Sources</h3>
+
+    <div class="source-note">
+      <strong>To add a new sell-side portal or follow a new analyst:</strong>
+      go to the portal website directly and add them to your Followed / Notifications list.
+      The scraper pulls from your followed list automatically — no configuration needed here.
+    </div>
+
+    <!-- Sell-side portals -->
+    <h4>Sell-Side Portals</h4>
+    <div class="source-grid">
+      {% for key, label in portal_labels.items() %}
+      {% set enabled = sources_portals.get(key, {}).get('enabled', False) %}
+      <label class="toggle-row">
+        <span class="toggle-label">{{ label }}</span>
+        <input type="checkbox" name="portals_{{ key }}" {% if enabled %}checked{% endif %} class="toggle-input">
+        <span class="toggle-switch"></span>
+      </label>
+      {% endfor %}
+    </div>
+
+    <!-- Podcasts -->
+    <h4>Podcasts</h4>
+    <div class="source-grid">
+      {% for key, label in podcast_labels.items() %}
+      {% set enabled = sources_podcasts.get(key, {}).get('enabled', False) %}
+      <label class="toggle-row">
+        <span class="toggle-label">{{ label }}</span>
+        <input type="checkbox" name="podcasts_{{ key }}" {% if enabled %}checked{% endif %} class="toggle-input">
+        <span class="toggle-switch"></span>
+      </label>
+      {% endfor %}
+    </div>
+
+    <!-- Other sources -->
+    <h4>Other Sources</h4>
+    <div class="source-grid">
+      {% for key, label in other_labels.items() %}
+      {% set enabled = sources_other.get(key, {}).get('enabled', False) %}
+      <label class="toggle-row">
+        <span class="toggle-label">{{ label }}</span>
+        <input type="checkbox" name="other_{{ key }}" {% if enabled %}checked{% endif %} class="toggle-input">
+        <span class="toggle-switch"></span>
+      </label>
+      {% endfor %}
+    </div>
+
+    <button type="submit" class="btn-primary" style="margin-top:20px">Save Sources</button>
+  </section>
+  </form>
+
+  <!-- ============================================================
+       PORTAL CREDENTIALS
+  ============================================================ -->
+  <section class="settings-section" id="portal-credentials">
+    <h3>Portal Access Credentials</h3>
+    <p class="muted">Credentials are encrypted and stored per user. Enter credentials once — the scraper will use them on every run and refresh cookies automatically.</p>
+
+    <!-- SSO/session-managed portals — no credential form needed -->
+    <div class="credential-row muted-row">
+      <strong>Jefferies</strong>
+      <span class="muted">SSO authentication — managed via the authentication alert above. Paste fresh cookies when prompted.</span>
+    </div>
+    <div class="credential-row muted-row">
+      <strong>Morgan Stanley</strong>
+      <span class="muted">Email verification link — paste when prompted in the authentication alert above.</span>
+    </div>
+
+    <!-- Email+password and token-based portals -->
+    {% for portal, info in credential_portals.items() %}
+    <div class="credential-card">
+      <h4>
+        {{ info.label }}
+        {% if portal_cred_status.get(portal) %}
+        <span class="badge-saved">&#10003; Saved</span>
+        {% endif %}
+      </h4>
+      <form method="post" action="{{ url_for('views.settings_credentials', portal=portal) }}">
+        <div class="cred-fields">
+          {% for field in info.fields %}
+          {% if field == 'password' %}
+          <input type="password" name="{{ field }}" placeholder="{{ field.replace('_', ' ').title() }}"
+                 autocomplete="new-password">
+          {% elif field == 'email' %}
+          <input type="email" name="{{ field }}" placeholder="Email address">
+          {% else %}
+          <input type="text" name="{{ field }}"
+                 placeholder="{{ field.replace('_', ' ').title() }}">
+          {% endif %}
+          {% endfor %}
+          <button type="submit" class="btn-small">Save</button>
+        </div>
+        {% if portal_cred_status.get(portal) %}
+        <p class="muted" style="font-size:0.82em;margin-top:4px">Leave fields blank to keep existing credentials.</p>
+        {% endif %}
+      </form>
+    </div>
+    {% endfor %}
+  </section>
+
+</div>
+
+<script>
+/* Ticker format validation — client-side, runs before form submit */
+function validateTicker(input) {
+  var v = input.value.toUpperCase();
+  var ok = /^[A-Z0-9]{1,6}(\.[A-Z]{2})?$/.test(v);
+  input.setCustomValidity(ok ? '' : 'Enter a valid ticker symbol (e.g. NVDA, MSFT, 700.HK).');
+}
+
+/* Investment theme keyword suggestion */
+document.addEventListener('DOMContentLoaded', function() {
+  var btn = document.getElementById('suggest-keywords-btn');
+  if (!btn) return;
+
+  btn.addEventListener('click', function() {
+    var nameInput = document.getElementById('theme-name-input');
+    var kwInput = document.getElementById('theme-keywords-input');
+    var status = document.getElementById('suggest-status');
+    var themeName = nameInput ? nameInput.value.trim() : '';
+
+    if (!themeName) {
+      if (nameInput) nameInput.focus();
+      status.textContent = 'Enter a theme name first.';
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Suggesting\u2026';
+    status.textContent = '';
+
+    fetch('/api/themes/suggest-keywords', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme_name: themeName })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.keywords && data.keywords.length) {
+        kwInput.value = data.keywords.join(', ');
+        status.textContent = 'Keywords suggested \u2014 edit if needed.';
+      } else {
+        status.textContent = 'No suggestions returned. Enter keywords manually.';
+      }
+    })
+    .catch(function() {
+      status.textContent = 'Request failed. Enter keywords manually.';
+    })
+    .finally(function() {
+      btn.disabled = false;
+      btn.textContent = 'Suggest keywords';
+    });
+  });
+});
+</script>
+{% endblock %}

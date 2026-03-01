@@ -22,13 +22,13 @@ import json
 import os
 from typing import List, Optional
 from dataclasses import dataclass, field, asdict
-from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from schemas import Chunk, Document
 import config
+from llm_client import llm_complete, is_configured
 
 # ------------------------------------------------------------------
 # Category and sub-topic definitions
@@ -47,8 +47,8 @@ TMT_SUBTOPICS = [
 CONTENT_TYPES = ['fact', 'interpretation', 'forecast', 'risk']
 POLARITIES = ['positive', 'negative', 'neutral', 'mixed']
 
-# Build ticker list string for the prompt
-_TICKER_LIST = ', '.join(sorted(set(config.ALL_TICKERS)))
+# Default ticker list (used when no per-user tickers are provided)
+_DEFAULT_TICKER_LIST = ', '.join(sorted(set(config.ALL_TICKERS)))
 
 
 # ------------------------------------------------------------------
@@ -75,18 +75,25 @@ class ChunkClassification:
 
 
 # ------------------------------------------------------------------
-# Classification Prompt
+# Classification Prompt (built dynamically per-call)
 # ------------------------------------------------------------------
 
-SYSTEM_PROMPT = f"""You are a financial document classifier. Classify the given text chunk into exactly one category.
+_PROMPT_STATIC = """You are a financial document classifier. Classify the given text chunk into exactly one category.
+Use waterfall logic such that if a chunk is classified as tracked_ticker, you do not need to continue checking if it matches with the
+latter three categories of tmt_sector, macro, or irrelevant.
 
 Output ONLY valid JSON with these fields:
 
 - category: one of (tracked_ticker, tmt_sector, macro, irrelevant)
-  - tracked_ticker: Chunk discusses a specific stock being tracked. Tracked tickers: {_TICKER_LIST}
+  - tracked_ticker: Chunk discusses a specific stock being tracked. Tracked tickers: {ticker_list}
   - tmt_sector: Chunk discusses TMT sector-level trends, themes, or developments not tied to a single tracked ticker
-  - macro: Chunk discusses macroeconomic or geopolitical factors (e.g. interest rates, unemployment, tariffs, trade policy, consumer confidence, elections, GDP, inflation)
-  - irrelevant: Chunk is about non-TMT sectors, boilerplate disclosures, or has no actionable content
+  - macro: Chunk discusses geopolitical or regulatory factors with DIRECT technology/TMT implications, OR macro conditions that materially shift TMT sector assumptions.
+    Qualify as macro ONLY if the chunk explicitly connects to technology, software, semiconductors, or digital platforms. Examples that qualify:
+    US-China export controls or sanctions, semiconductor import tariffs, CFIUS reviews of tech deals, antitrust actions against big tech (DOJ/FTC/EU DMA), AI regulation,
+    data privacy legislation, AI capex or hyperscaler spending trends, Taiwan geopolitics affecting chip supply.
+    Examples that do NOT qualify as macro (classify as irrelevant instead): general inflation reports, unemployment data, GDP forecasts, Fed rate decisions, etc.
+    — UNLESS the chunk explicitly discusses how these affect tech hardware margins, software multiples, or digital ad spending.
+  - irrelevant: all else
 
 - tickers: array of tracked stock tickers discussed (e.g. ["META", "GOOGL"]). Only include tickers from the tracked list above. Empty array if none.
 
@@ -110,10 +117,8 @@ Rules:
 2. A chunk about a tracked ticker should be tracked_ticker even if it also has sector implications
 3. Extract actual tickers mentioned — only tag tickers from the tracked list
 4. Boilerplate (disclosures, disclaimers, page headers/footers) → irrelevant
-5. Non-TMT sectors (healthcare, energy, industrials, consumer staples, real estate, etc.) → irrelevant
-6. AI, LLMs, developer tools, software disruption, chip performance, and enterprise tech are ALWAYS tmt_sector — do not mark these irrelevant even if no tracked ticker is named
-7. When genuinely uncertain between tmt_sector and irrelevant, prefer tmt_sector
-8. NEVER classify as irrelevant if the chunk announces or describes ANY of the following for a named company:
+5. Non-TMT sectors (healthcare, energy, industrials, consumer staples, real estate, automotive dealers, auto parts suppliers) → irrelevant
+6. NEVER classify as irrelevant if the chunk announces or describes ANY of the following for a named company:
    - Earnings results, revenue/EPS beats or misses, impairments, write-downs, restatements
    - Guidance changes, preannouncements, mid-quarter revisions, major contract wins/losses
    - M&A transactions, acquisitions, divestitures, take-privates, mergers, spin-offs
@@ -123,7 +128,37 @@ Rules:
    - Major product launches, product recalls, significant pricing changes in SaaS/platform businesses
    - Subscriber/user growth beats or misses, churn spikes, ARPU inflections (for streaming/SaaS/social)
    These are HIGH-ALERT events and must be routed as tracked_ticker (if a tracked ticker is named)
-   or tmt_sector (if sector-level). Only mark irrelevant if the chunk is pure boilerplate/disclaimer."""
+   or tmt_sector (if sector-level). Only mark irrelevant if the chunk is pure boilerplate/disclaimer.
+7. PRIMARY SUBJECT RULE: Only populate "tickers" and set category=tracked_ticker if a tracked ticker
+   is the PRIMARY SUBJECT of the chunk — i.e., the chunk is meaningfully about what that specific company
+   did, announced, reported, or plans. If a tracked ticker appears only in passing (as a comparison,
+   benchmark, or peer reference), do NOT tag it. If the main subject is a company NOT in the tracked list
+   (e.g., Arista Networks, Tuhu, Trip.com, Via Transportation, Autonation), classify as tmt_sector and
+   leave "tickers" empty — do not assign a tracked ticker just because one is mentioned nearby.{themes_section}"""
+
+
+def _build_system_prompt(
+    ticker_list: str = "",
+    investment_themes: Optional[List[dict]] = None,
+) -> str:
+    """Build the classification system prompt with dynamic ticker list and investment themes."""
+    tl = ticker_list or _DEFAULT_TICKER_LIST
+
+    themes_section = ""
+    if investment_themes:
+        lines = "\n".join(
+            f"  - {t['name']}: {', '.join(t.get('keywords', []))}"
+            for t in investment_themes
+            if t.get('keywords')
+        )
+        if lines:
+            themes_section = (
+                "\n\nInvestment themes being tracked by this analyst "
+                "(bias toward tmt_sector or tracked_ticker for content directly relevant to these themes):\n"
+                + lines
+            )
+
+    return _PROMPT_STATIC.format(ticker_list=tl, themes_section=themes_section)
 
 
 def _build_user_prompt(chunk: Chunk, doc: Optional[Document] = None) -> str:
@@ -160,24 +195,29 @@ def _build_user_prompt(chunk: Chunk, doc: Optional[Document] = None) -> str:
 def classify_chunk(
     chunk: Chunk,
     doc: Optional[Document] = None,
-    client: Optional[OpenAI] = None,
+    system_prompt: Optional[str] = None,
+    tracked_tickers: Optional[List[str]] = None,
 ) -> ChunkClassification:
-    """Classify a single chunk using GPT-3.5-turbo."""
-    if client is None:
-        client = OpenAI()
+    """Classify a single chunk via the configured classification model.
 
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+    Args:
+        system_prompt: Pre-built system prompt (built once per batch call for efficiency).
+                       If None, a default prompt is built from config values.
+        tracked_tickers: Ticker whitelist for validation. Falls back to config.ALL_TICKERS.
+    """
+    prompt = system_prompt or _build_system_prompt()
+    ticker_whitelist = set(tracked_tickers) if tracked_tickers else set(config.ALL_TICKERS)
+
+    raw = llm_complete(
+        "classification",
+        [
+            {"role": "system", "content": prompt},
             {"role": "user", "content": _build_user_prompt(chunk, doc)},
         ],
         temperature=0,
         max_tokens=200,
-        response_format={"type": "json_object"},
+        json_mode=True,
     )
-
-    raw = response.choices[0].message.content
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -188,9 +228,9 @@ def classify_chunk(
     if category not in CATEGORIES:
         category = 'irrelevant'
 
-    # Validate tickers — only keep tracked ones
+    # Validate tickers — only keep tickers from the user's tracked list
     raw_tickers = data.get('tickers', [])
-    tickers = [t for t in raw_tickers if t in config.ALL_TICKERS] if isinstance(raw_tickers, list) else []
+    tickers = [t for t in raw_tickers if t in ticker_whitelist] if isinstance(raw_tickers, list) else []
 
     # If tickers found but category wasn't tracked_ticker, fix it
     if tickers and category != 'tracked_ticker':
@@ -230,16 +270,26 @@ def classify_chunk(
 def classify_chunks(
     chunks: List[Chunk],
     doc: Optional[Document] = None,
-    client: Optional[OpenAI] = None,
+    tracked_tickers: Optional[List[str]] = None,
+    investment_themes: Optional[List[dict]] = None,
 ) -> List[ChunkClassification]:
-    """Classify multiple chunks sequentially."""
-    if client is None:
-        client = OpenAI()
+    """Classify multiple chunks sequentially.
+
+    Args:
+        tracked_tickers: User's ticker list. Falls back to config.ALL_TICKERS if None.
+        investment_themes: User's investment themes (name + keywords). Falls back to
+                           config.INVESTMENT_THEMES if None. Injected into classifier prompt.
+    """
+    # Build prompt once per batch — includes user's tickers and themes
+    tickers = tracked_tickers or list(config.ALL_TICKERS)
+    themes = investment_themes or config.INVESTMENT_THEMES
+    ticker_list_str = ', '.join(sorted(set(tickers)))
+    system_prompt = _build_system_prompt(ticker_list_str, themes)
 
     results = []
     for i, chunk in enumerate(chunks):
         print(f"  Classifying chunk {i+1}/{len(chunks)}...", end='\r')
-        classification = classify_chunk(chunk, doc, client)
+        classification = classify_chunk(chunk, doc, system_prompt=system_prompt, tracked_tickers=tickers)
         results.append(classification)
 
     print(f"  Classified {len(chunks)} chunks" + " " * 20)
@@ -366,8 +416,8 @@ of future results.""",
     print("Chunk Classification Test (4-Category System)")
     print("=" * 60)
 
-    if os.getenv('OPENAI_API_KEY'):
-        print("\nRunning live classification with GPT-3.5-turbo...\n")
+    if is_configured('classification'):
+        print("\nRunning live classification...\n")
 
         classifications = classify_chunks(sample_chunks, sample_doc)
 
@@ -455,4 +505,4 @@ of future results.""",
             print(f"  - {st}")
 
         print(f"\nTracked tickers ({len(config.ALL_TICKERS)}):")
-        print(f"  {_TICKER_LIST}")
+        print(f"  {_DEFAULT_TICKER_LIST}")

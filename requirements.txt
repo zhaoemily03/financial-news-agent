@@ -13,3 +13,10 @@ python-dateutil==2.8.2
 # Podcast ingestion
 feedparser>=6.0.10
 youtube-transcript-api>=0.6.1
+
+# Web UI
+markdown==3.5
+apscheduler==3.10.4
+pytz>=2023.3
+gunicorn>=21.2.0
+cryptography>=41.0.0

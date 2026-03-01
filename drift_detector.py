@@ -9,7 +9,6 @@ Detects:
 - Belief pressure shifts (confirms→contradicts)
 - Hedging language emergence
 - New disagreement between sources
-- Attention decay or resurgence (topic appearing/disappearing)
 
 No AI. Deterministic comparison of claim metadata over time.
 
@@ -19,7 +18,7 @@ Usage:
     signals = detect_drift(today_claims, prior_claims)
 """
 
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from collections import defaultdict
 from datetime import datetime
@@ -29,17 +28,21 @@ from claim_tracker import ClaimTracker, HistoricalClaim
 
 
 # ------------------------------------------------------------------
-# Drift Signal Types
+# Configuration
 # ------------------------------------------------------------------
 
 CONFIDENCE_ORDER = {'low': 0, 'medium': 1, 'high': 2}
+CONF_LABEL = {0: 'low', 1: 'medium', 2: 'high'}
+
+# Default windows if not specified — 7d = noise check, 30d = developing theme, 90d = structural
+DEFAULT_ANALYSIS_WINDOWS = [7, 30, 90]
 
 
 @dataclass
 class DriftSignal:
     """A detected belief shift. The analyst decides if it matters."""
     signal_id: str
-    drift_type: str            # confidence_shift | belief_flip | new_disagreement | resurgence | decay
+    drift_type: str            # confidence_shift | belief_flip | new_disagreement
     ticker: Optional[str]
     description: str           # What changed (factual, not interpretive)
     today_claim: str           # Current claim text
@@ -54,13 +57,17 @@ class DriftSignal:
     prior_confidence: Optional[str] = None
     today_belief_pressure: Optional[str] = None
     prior_belief_pressure: Optional[str] = None
+    # Multi-window context
+    window_days: int = 7                # Shortest window that triggered this signal
+    cross_window_context: str = ""      # e.g. "90d: high → 30d: high → 7d: medium → today: low (structural decline)"
 
 
 @dataclass
 class DriftReport:
     """All drift signals for a briefing period."""
     signals: List[DriftSignal] = field(default_factory=list)
-    lookback_days: int = 7
+    lookback_days: int = 90
+    windows_analyzed: List[int] = field(default_factory=lambda: DEFAULT_ANALYSIS_WINDOWS)
     today_claim_count: int = 0
     prior_claim_count: int = 0
 
@@ -97,68 +104,221 @@ class DriftReport:
 
 
 # ------------------------------------------------------------------
+# Multi-Window Trajectory Helpers
+# ------------------------------------------------------------------
+
+def _conf_label(avg: float) -> str:
+    """Map a 0-2 float average to a readable confidence label."""
+    return CONF_LABEL.get(max(0, min(2, round(avg))), 'medium')
+
+
+def _build_confidence_trajectory(
+    avg_today: float,
+    window_avgs: Dict[int, Optional[float]],
+    windows: List[int],
+) -> str:
+    """
+    Build readable trajectory string across all windows.
+    e.g. "90d: high → 30d: high → 7d: medium → today: low (gradual structural decline)"
+
+    Pattern labels are gated on actual data depth — avoids claiming 'structural'
+    or 'sustained' trends when only short-window data exists.
+    """
+    parts = []
+    available = []
+    for window in sorted(windows, reverse=True):   # longest to shortest
+        v = window_avgs.get(window)
+        if v is not None:
+            parts.append(f"{window}d: {_conf_label(v)}")
+            available.append((window, v))
+    parts.append(f"today: {_conf_label(avg_today)}")
+    trajectory = " → ".join(parts)
+
+    if not available:
+        return trajectory  # no prior data — signal still valid but no pattern
+
+    max_window = available[0][0]   # longest window with actual data
+
+    if len(available) < 2:
+        # Only one prior window — acknowledge the shift without trend classification
+        return f"{trajectory} ({max_window}d history only)"
+
+    oldest_avg = available[0][1]    # e.g. 90d (or whatever max is)
+    recent_avg = available[-1][1]   # e.g. 7d (closest prior window)
+    overall = avg_today - oldest_avg
+    recent = avg_today - recent_avg
+
+    # Pattern labels gated on available history depth
+    if max_window >= 90:
+        # Full history — structural/sustained language is warranted
+        if overall < -0.8 and abs(recent) < 0.3:
+            pattern = "gradual structural decline"
+        elif overall < -0.5 and recent < -0.5:
+            pattern = "accelerating decline"
+        elif abs(overall) < 0.3 and recent < -0.7:
+            pattern = "sudden reversal of previously stable trend"
+        elif overall > 0.8 and recent > 0.3:
+            pattern = "strengthening conviction across all windows"
+        elif overall > 0.5:
+            pattern = "sustained conviction hardening"
+        elif overall < -0.5:
+            pattern = "declining conviction, longer-term trend"
+        else:
+            pattern = "minor adjustment"
+    elif max_window >= 30:
+        # 30d max — developing theme, avoid structural language
+        if overall < -0.5 and recent < -0.5:
+            pattern = "accelerating decline over past month"
+        elif overall > 0.5 and recent > 0.3:
+            pattern = "conviction hardening over past month"
+        elif abs(overall) < 0.3 and recent < -0.7:
+            pattern = "sudden shift"
+        elif overall < -0.5:
+            pattern = "declining conviction (30d history)"
+        elif overall > 0.5:
+            pattern = "rising conviction (30d history)"
+        else:
+            pattern = "minor adjustment"
+    else:
+        # Only 7d data — flag limited basis explicitly
+        pattern = "recent shift (7d history only)"
+
+    return f"{trajectory} ({pattern})"
+
+
+def _build_belief_trajectory(
+    today_dominant: str,
+    window_dominants: Dict[int, Optional[str]],
+    windows: List[int],
+) -> str:
+    """
+    Build readable belief-direction trajectory.
+    e.g. "90d: positive → 30d: positive → 7d: negative (reversal of sustained prior trend)"
+
+    Pattern labels are gated on available data depth — avoids claiming 'sustained'
+    trends when only short-window data exists.
+    """
+    parts = []
+    available = []
+    for window in sorted(windows, reverse=True):
+        d = window_dominants.get(window)
+        if d and d != 'neutral':
+            parts.append(f"{window}d: {d}")
+            available.append((window, d))
+    parts.append(f"today: {today_dominant}")
+    trajectory = " → ".join(parts)
+
+    if not available:
+        return trajectory  # no prior data — signal still valid but no pattern
+
+    max_window = available[0][0]
+
+    if len(available) < 2:
+        return f"{trajectory} ({max_window}d history only)"
+
+    oldest = available[0][1]
+    recent = available[-1][1]
+
+    # 'Sustained' language requires at least 30d; 7d-only gets a limited-basis label
+    if max_window >= 30:
+        if oldest == recent and recent != today_dominant:
+            pattern = "reversal of sustained prior trend"
+        elif oldest != recent and recent == today_dominant:
+            pattern = "continuation of recent shift"
+        elif oldest != today_dominant and recent != today_dominant:
+            pattern = "sharp directional change across all windows"
+        else:
+            pattern = "mixed signals across windows"
+    else:
+        # Only 7d data — describe without implying sustained history
+        if oldest != today_dominant:
+            pattern = "recent directional change (7d history only)"
+        else:
+            pattern = "mixed signals"
+
+    return f"{trajectory} ({pattern})"
+
+
+# ------------------------------------------------------------------
 # Drift Detection Logic
 # ------------------------------------------------------------------
 
 def _detect_confidence_shifts(
     today_claims: List[ClaimOutput],
-    prior_claims: List[HistoricalClaim],
+    prior_by_window: Dict[int, List[HistoricalClaim]],
+    windows: List[int],
 ) -> List[DriftSignal]:
     """
-    Detect when confidence on a ticker/topic has shifted.
-    e.g., Source was 'high' confidence on META, now 'medium'.
+    Multi-window confidence drift detection.
+    For each ticker, computes average confidence at 7d, 30d, 90d windows
+    and today, then flags meaningful shifts with a cross-window trajectory narrative.
     """
     signals = []
 
-    # Group today's claims by ticker
-    today_by_ticker = defaultdict(list)
+    today_by_ticker: Dict[str, List[ClaimOutput]] = defaultdict(list)
     for c in today_claims:
         if c.ticker:
             today_by_ticker[c.ticker].append(c)
 
-    # Group prior claims by ticker
-    prior_by_ticker = defaultdict(list)
-    for c in prior_claims:
-        if c.ticker:
-            prior_by_ticker[c.ticker].append(c)
+    # Build {window: {ticker: [claims]}} lookup
+    by_window_ticker: Dict[int, Dict[str, List[HistoricalClaim]]] = {}
+    for window, wc in prior_by_window.items():
+        bt: Dict[str, List[HistoricalClaim]] = defaultdict(list)
+        for c in wc:
+            if c.ticker:
+                bt[c.ticker].append(c)
+        by_window_ticker[window] = bt
 
     for ticker in today_by_ticker:
-        if ticker not in prior_by_ticker:
-            continue
-
         today_confs = [CONFIDENCE_ORDER.get(c.confidence_level, 1) for c in today_by_ticker[ticker]]
-        prior_confs = [CONFIDENCE_ORDER.get(c.confidence_level, 1) for c in prior_by_ticker[ticker]]
-
         avg_today = sum(today_confs) / len(today_confs)
-        avg_prior = sum(prior_confs) / len(prior_confs)
 
-        diff = avg_today - avg_prior
+        # Average confidence at each window
+        window_avgs: Dict[int, Optional[float]] = {}
+        for window in windows:
+            prior = by_window_ticker.get(window, {}).get(ticker, [])
+            if prior:
+                confs = [CONFIDENCE_ORDER.get(c.confidence_level, 1) for c in prior]
+                window_avgs[window] = sum(confs) / len(confs)
+            else:
+                window_avgs[window] = None
 
-        # Only flag meaningful shifts (>0.5 on 0-2 scale)
-        if abs(diff) < 0.5:
+        # Only signal if at least one window shows a meaningful shift
+        meaningful = [
+            (w, avg) for w, avg in window_avgs.items()
+            if avg is not None and abs(avg - avg_today) >= 0.5
+        ]
+        if not meaningful:
             continue
 
-        direction = "hardening" if diff > 0 else "softening"
-        severity = "high" if abs(diff) >= 1.0 else "medium"
+        context = _build_confidence_trajectory(avg_today, window_avgs, windows)
+        max_shift = max(abs(avg - avg_today) for _, avg in meaningful)
+        severity = 'high' if max_shift >= 1.0 else 'medium'
+        primary_window = min(w for w, _ in meaningful)   # shortest window that triggered
 
-        # Pick representative claims
+        prior_avg = window_avgs.get(primary_window) or avg_today
+        direction = "softening" if avg_today < prior_avg else "hardening"
+
         today_rep = today_by_ticker[ticker][0]
-        prior_rep = prior_by_ticker[ticker][0]
+        prior_list = by_window_ticker.get(primary_window, {}).get(ticker, [])
+        prior_rep = prior_list[0] if prior_list else None
 
         signals.append(DriftSignal(
             signal_id=f"conf_{ticker}_{datetime.now().strftime('%Y%m%d')}",
             drift_type='confidence_shift',
             ticker=ticker,
-            description=f"Confidence {direction} on {ticker}: sources moved from {prior_rep.confidence_level} to {today_rep.confidence_level}",
+            description=f"Confidence {direction} on {ticker}: {context}",
             today_claim=today_rep.bullets[0] if today_rep.bullets else "",
-            prior_claim=prior_rep.bullets[0] if prior_rep.bullets else "",
+            prior_claim=prior_rep.bullets[0] if prior_rep and prior_rep.bullets else "",
             today_source=today_rep.source_citation,
-            prior_source=prior_rep.source_citation,
+            prior_source=prior_rep.source_citation if prior_rep else None,
             today_date=datetime.now().strftime('%Y-%m-%d'),
-            prior_date=prior_rep.date_stored,
+            prior_date=prior_rep.date_stored if prior_rep else None,
             severity=severity,
             today_confidence=today_rep.confidence_level,
-            prior_confidence=prior_rep.confidence_level,
+            prior_confidence=prior_rep.confidence_level if prior_rep else None,
+            window_days=primary_window,
+            cross_window_context=context,
         ))
 
     return signals
@@ -166,15 +326,16 @@ def _detect_confidence_shifts(
 
 def _detect_belief_flips(
     today_claims: List[ClaimOutput],
-    prior_claims: List[HistoricalClaim],
+    prior_by_window: Dict[int, List[HistoricalClaim]],
+    windows: List[int],
 ) -> List[DriftSignal]:
     """
-    Detect when belief pressure has flipped.
-    e.g., Source confirmed consensus on CRWD, now contradicts it.
+    Multi-window belief-direction flip detection.
+    Tracks dominant belief pressure (positive/negative) at each window
+    and flags directional reversals with a trajectory narrative.
     """
     signals = []
 
-    # Map belief pressure to direction
     BELIEF_DIRECTION = {
         'confirms_consensus': 'positive',
         'contradicts_consensus': 'negative',
@@ -182,47 +343,68 @@ def _detect_belief_flips(
         'unclear': 'neutral',
     }
 
-    today_by_ticker = defaultdict(list)
+    today_by_ticker: Dict[str, List[ClaimOutput]] = defaultdict(list)
     for c in today_claims:
         if c.ticker:
             today_by_ticker[c.ticker].append(c)
 
-    prior_by_ticker = defaultdict(list)
-    for c in prior_claims:
-        if c.ticker:
-            prior_by_ticker[c.ticker].append(c)
+    by_window_ticker: Dict[int, Dict[str, List[HistoricalClaim]]] = {}
+    for window, wc in prior_by_window.items():
+        bt: Dict[str, List[HistoricalClaim]] = defaultdict(list)
+        for c in wc:
+            if c.ticker:
+                bt[c.ticker].append(c)
+        by_window_ticker[window] = bt
 
     for ticker in today_by_ticker:
-        if ticker not in prior_by_ticker:
+        today_dirs = [BELIEF_DIRECTION.get(c.belief_pressure, 'neutral') for c in today_by_ticker[ticker]]
+        today_dominant = max(set(today_dirs), key=today_dirs.count)
+
+        if today_dominant == 'neutral':
             continue
 
-        today_directions = [BELIEF_DIRECTION.get(c.belief_pressure, 'neutral') for c in today_by_ticker[ticker]]
-        prior_directions = [BELIEF_DIRECTION.get(c.belief_pressure, 'neutral') for c in prior_by_ticker[ticker]]
+        # Dominant direction at each window
+        window_dominants: Dict[int, Optional[str]] = {}
+        for window in windows:
+            prior = by_window_ticker.get(window, {}).get(ticker, [])
+            if prior:
+                dirs = [BELIEF_DIRECTION.get(c.belief_pressure, 'neutral') for c in prior]
+                window_dominants[window] = max(set(dirs), key=dirs.count)
+            else:
+                window_dominants[window] = None
 
-        # Check for directional flip
-        today_dominant = max(set(today_directions), key=today_directions.count)
-        prior_dominant = max(set(prior_directions), key=prior_directions.count)
-
-        if today_dominant == prior_dominant or 'neutral' in (today_dominant, prior_dominant):
+        # Signal if any non-neutral window shows a different direction than today
+        flipped = [
+            (w, d) for w, d in window_dominants.items()
+            if d and d != 'neutral' and d != today_dominant
+        ]
+        if not flipped:
             continue
+
+        context = _build_belief_trajectory(today_dominant, window_dominants, windows)
+        primary_window = min(w for w, _ in flipped)
+        prior_dominant = window_dominants.get(primary_window) or 'unknown'
 
         today_rep = today_by_ticker[ticker][0]
-        prior_rep = prior_by_ticker[ticker][0]
+        prior_list = by_window_ticker.get(primary_window, {}).get(ticker, [])
+        prior_rep = prior_list[0] if prior_list else None
 
         signals.append(DriftSignal(
             signal_id=f"flip_{ticker}_{datetime.now().strftime('%Y%m%d')}",
             drift_type='belief_flip',
             ticker=ticker,
-            description=f"Belief flip on {ticker}: was {prior_dominant}, now {today_dominant}",
+            description=f"Belief flip on {ticker}: {context}",
             today_claim=today_rep.bullets[0] if today_rep.bullets else "",
-            prior_claim=prior_rep.bullets[0] if prior_rep.bullets else "",
+            prior_claim=prior_rep.bullets[0] if prior_rep and prior_rep.bullets else "",
             today_source=today_rep.source_citation,
-            prior_source=prior_rep.source_citation,
+            prior_source=prior_rep.source_citation if prior_rep else None,
             today_date=datetime.now().strftime('%Y-%m-%d'),
-            prior_date=prior_rep.date_stored,
+            prior_date=prior_rep.date_stored if prior_rep else None,
             severity="high",
             today_belief_pressure=today_rep.belief_pressure,
-            prior_belief_pressure=prior_rep.belief_pressure,
+            prior_belief_pressure=prior_rep.belief_pressure if prior_rep else None,
+            window_days=primary_window,
+            cross_window_context=context,
         ))
 
     return signals
@@ -296,89 +478,15 @@ def _detect_new_disagreements(
     return signals
 
 
-def _detect_resurgence(
-    today_claims: List[ClaimOutput],
-    prior_claims: List[HistoricalClaim],
-    lookback_days: int = 7,
-) -> List[DriftSignal]:
-    """
-    Detect tickers/topics that reappear after a period of absence.
-    "We haven't heard about X in a week — now 3 claims."
-    """
-    signals = []
-
-    today_tickers = {c.ticker for c in today_claims if c.ticker}
-
-    # Find which tickers were active in older history but not recent
-    prior_by_ticker = defaultdict(list)
-    for c in prior_claims:
-        if c.ticker:
-            prior_by_ticker[c.ticker].append(c)
-
-    for ticker in today_tickers:
-        prior_group = prior_by_ticker.get(ticker, [])
-        today_group = [c for c in today_claims if c.ticker == ticker]
-
-        # Resurgence = appeared today but not in prior period, OR
-        # today's claim count significantly exceeds prior
-        if not prior_group and len(today_group) >= 2:
-            rep = today_group[0]
-            signals.append(DriftSignal(
-                signal_id=f"resurge_{ticker}_{datetime.now().strftime('%Y%m%d')}",
-                drift_type='resurgence',
-                ticker=ticker,
-                description=f"{ticker}: {len(today_group)} claims today, absent from prior {lookback_days} days",
-                today_claim=rep.bullets[0] if rep.bullets else "",
-                prior_claim=None,
-                today_source=rep.source_citation,
-                prior_source=None,
-                today_date=datetime.now().strftime('%Y-%m-%d'),
-                prior_date=None,
-                severity="medium",
-            ))
-
-    return signals
-
-
-def _detect_attention_decay(
-    today_claims: List[ClaimOutput],
-    prior_claims: List[HistoricalClaim],
-) -> List[DriftSignal]:
-    """
-    Detect tickers that had coverage but now have none.
-    "SNOW had 5 claims last week, zero today."
-    """
-    signals = []
-
-    today_tickers = {c.ticker for c in today_claims if c.ticker}
-
-    prior_by_ticker = defaultdict(list)
-    for c in prior_claims:
-        if c.ticker:
-            prior_by_ticker[c.ticker].append(c)
-
-    for ticker, prior_group in prior_by_ticker.items():
-        if ticker in today_tickers:
-            continue
-        if len(prior_group) < 2:
-            continue  # Only flag if it was actively discussed
-
-        rep = prior_group[0]
-        signals.append(DriftSignal(
-            signal_id=f"decay_{ticker}_{datetime.now().strftime('%Y%m%d')}",
-            drift_type='decay',
-            ticker=ticker,
-            description=f"{ticker}: {len(prior_group)} claims in prior period, none today",
-            today_claim="",
-            prior_claim=rep.bullets[0] if rep.bullets else "",
-            today_source="",
-            prior_source=rep.source_citation,
-            today_date=datetime.now().strftime('%Y-%m-%d'),
-            prior_date=rep.date_stored,
-            severity="low",
-        ))
-
-    return signals
+def _days_ago(date_str: Optional[str]) -> int:
+    """Return how many days ago a date string (YYYY-MM-DD) was. Returns 9999 if unparseable."""
+    if not date_str:
+        return 9999
+    try:
+        d = datetime.strptime(date_str, '%Y-%m-%d')
+        return (datetime.now() - d).days
+    except ValueError:
+        return 9999
 
 
 # ------------------------------------------------------------------
@@ -388,53 +496,73 @@ def _detect_attention_decay(
 def detect_drift(
     today_claims: List[ClaimOutput],
     tracker: ClaimTracker,
-    lookback_days: int = 7,
+    lookback_days: int = 90,
+    windows: Optional[List[int]] = None,
 ) -> DriftReport:
     """
-    Compare today's claims against historical claims to detect drift.
+    Compare today's claims against historical claims across multiple time windows.
+
+    Detects sentiment changes only — confidence softening/hardening, belief
+    direction flips, and new source disagreement. Does NOT count claims or
+    flag publication frequency changes (how often a source covers a ticker
+    is not a reliable sentiment signal).
+
+    For each ticker, confidence and belief are compared at 7d, 30d, and 90d
+    windows simultaneously. Pattern labels are gated on available history:
+    'structural' language requires 90d data, 'month' language requires 30d.
 
     Args:
         today_claims: Claims from today's briefing
-        tracker: ClaimTracker with historical data
-        lookback_days: How far back to compare
+        tracker: ClaimTracker with historical data (store ≥180 days)
+        lookback_days: Outer window (default 90)
+        windows: Comparison windows (default: [7, 30, 90])
 
     Returns:
-        DriftReport with all detected signals
+        DriftReport with sentiment drift signals
     """
-    # Get prior claims from tracker
-    prior_claims = []
-    for claim in today_claims:
-        if claim.ticker:
-            ticker_history = tracker.get_claims_for_ticker(
-                claim.ticker, days=lookback_days, exclude_today=True
-            )
-            prior_claims.extend(ticker_history)
+    if windows is None:
+        windows = DEFAULT_ANALYSIS_WINDOWS
 
-    # Deduplicate prior claims
-    seen_ids = set()
-    unique_prior = []
-    for c in prior_claims:
-        if c.claim_id not in seen_ids:
-            seen_ids.add(c.claim_id)
-            unique_prior.append(c)
+    # Fetch prior claims at each window for today's tickers
+    today_tickers = {c.ticker for c in today_claims if c.ticker}
+    prior_by_window: Dict[int, List[HistoricalClaim]] = {}
 
-    # Run all detectors
-    all_signals = []
-    all_signals.extend(_detect_confidence_shifts(today_claims, unique_prior))
-    all_signals.extend(_detect_belief_flips(today_claims, unique_prior))
-    all_signals.extend(_detect_new_disagreements(today_claims, unique_prior))
-    all_signals.extend(_detect_resurgence(today_claims, unique_prior, lookback_days))
-    all_signals.extend(_detect_attention_decay(today_claims, unique_prior))
+    for window in windows:
+        window_claims: List[HistoricalClaim] = []
+        seen_ids: set = set()
+        for ticker in today_tickers:
+            for claim in tracker.get_claims_for_ticker(ticker, days=window, exclude_today=True):
+                if claim.claim_id not in seen_ids:
+                    seen_ids.add(claim.claim_id)
+                    window_claims.append(claim)
+        prior_by_window[window] = window_claims
 
-    # Sort by severity (high first)
+    # Shortest window's claims used for new_disagreement detection
+    short_window = min(windows)
+    short_prior = prior_by_window.get(short_window, [])
+
+    # Total unique prior claims across all windows (for stats)
+    all_prior_ids: set = set()
+    for wc in prior_by_window.values():
+        for c in wc:
+            all_prior_ids.add(c.claim_id)
+
+    # Run detectors — sentiment signals only (no claim-count heuristics)
+    all_signals: List[DriftSignal] = []
+    all_signals.extend(_detect_confidence_shifts(today_claims, prior_by_window, windows))
+    all_signals.extend(_detect_belief_flips(today_claims, prior_by_window, windows))
+    all_signals.extend(_detect_new_disagreements(today_claims, short_prior))
+
+    # Sort by severity (high first), then type
     severity_order = {'high': 0, 'medium': 1, 'low': 2}
-    all_signals.sort(key=lambda s: severity_order.get(s.severity, 3))
+    all_signals.sort(key=lambda s: (severity_order.get(s.severity, 3), s.drift_type))
 
     return DriftReport(
         signals=all_signals,
         lookback_days=lookback_days,
+        windows_analyzed=windows,
         today_claim_count=len(today_claims),
-        prior_claim_count=len(unique_prior),
+        prior_claim_count=len(all_prior_ids),
     )
 
 
@@ -568,7 +696,7 @@ if __name__ == "__main__":
 
     print(f"\n  Prior claims: {len(prior_claims)} (backdated to 2026-02-01)")
     print(f"  Today claims: {len(today_claims)}")
-    print(f"  Expected: META confidence softening, CRWD belief flip + new disagreement, GOOGL resurgence, AMZN decay")
+    print(f"  Expected: META confidence softening, CRWD belief flip + new disagreement")
 
     # Run drift detection
     print("\n  Running drift detection...")
@@ -613,16 +741,6 @@ if __name__ == "__main__":
         print("✓ New disagreement detected (CRWD)")
     else:
         print("○ New disagreement not detected (may need more data)")
-
-    if 'resurgence' in types_found:
-        print("✓ Resurgence detected (GOOGL)")
-    else:
-        print("○ Resurgence not detected (may need more data)")
-
-    if 'decay' in types_found:
-        print("✓ Attention decay detected (AMZN)")
-    else:
-        print("○ Attention decay not detected (may need more data)")
 
     # Cleanup
     os.remove(test_db)

@@ -1,12 +1,12 @@
 """
-Hardcoded AnalystConfig for TMT (Technology, Media, Telecom) analyst.
+Hardcoded AnalystConfig for user.
+This is where the logic is that doesn't change from user to user.
 Explicit relevance policy — intentionally lossy to enforce <5-page constraint.
 
 This config defines:
 - Category weights (tracked_ticker > tmt_sector > macro)
-- TMT subtopic weights (cloud > consumer internet)
-- Source credibility (Jefferies high)
-- Ticker priority (primary > watchlist)
+- Source credibility (acknowledging that sell-side has positive bias)
+- Ticker priority (primary > watchlist) — loaded dynamically from config.TICKERS
 
 Usage:
     from analyst_config_tmt import TMT_CONFIG, score_chunk, SOURCE_CREDIBILITY
@@ -29,19 +29,6 @@ CATEGORY_WEIGHTS = {
 }
 
 # ------------------------------------------------------------------
-# TMT Subtopic Weights — higher = more relevant to TMT analyst
-# ------------------------------------------------------------------
-# Scale: 0.0 (ignore) to 1.0 (critical)
-
-SUBTOPIC_WEIGHTS = {
-    'cloud_enterprise_software': 1.0,       # Cloud, SaaS, enterprise apps
-    'internet_digital_advertising': 0.85,   # Digital ads, ad tech, social
-    'semiconductors_hardware': 0.8,         # Chips, GPUs, data centers
-    'consumer_internet_media': 0.7,         # Streaming, gaming, e-commerce
-    'telecom_infrastructure': 0.5,          # 5G, wireless, towers
-}
-
-# ------------------------------------------------------------------
 # Source Credibility — analytical depth scores by source
 # ------------------------------------------------------------------
 # Scale: 0.0 (untrusted) to 1.0 (highly trusted)
@@ -58,13 +45,14 @@ SOURCE_CREDIBILITY = {
     'morgan_stanley': 0.8,
     'goldman': 0.8,
     'bernstein': 0.8,
-    'bofa': 0.75,
     'citi': 0.75,
     'ubs': 0.75,
     'barclays': 0.75,
+    'arete': 0.75,
+    'macquarie': 0.75,
     'substack': 0.75,          # Independent; no structural directional bias; quality varies by author
     'podcast': 0.65,           # Market commentary; informal but unconstrained
-    'x': 0.4,                  # Social media, low signal
+ #   'x': 0.4,                  # Social media, low signal
     'unknown': 0.3,
 }
 
@@ -86,7 +74,7 @@ HIGH_ALERT_EVENT_TYPES = {
 # Source type groupings — used by synthesizer to surface cross-type tension
 SELL_SIDE_SOURCES = {
     'jefferies', 'jpmorgan', 'morgan_stanley', 'goldman', 'bernstein',
-    'bofa', 'citi', 'ubs', 'barclays',
+    'citi', 'ubs', 'barclays', 'arete', 'macquarie',
 }
 INDEPENDENT_SOURCES = {'substack', 'podcast', 'x'}
 
@@ -95,11 +83,8 @@ SOURCE_BIAS_NOTES = {
     'sell_side': (
         'High analytical depth and data access. '
         'Structural positive bias: compensation tied to deal flow and buy-side relationships; '
-        'ratings and price targets tend to skew constructive. '
-        'Sell-side consensus is a weak signal — it often lags reality.'
     ),
     'independent': (
-        'No structural directional bias. '
         'Quality varies by author but views are unconstrained by deal relationships. '
         'When independent sources diverge from sell-side, treat as high-signal.'
     ),
@@ -117,37 +102,51 @@ CONTENT_TYPE_WEIGHTS = {
 }
 
 # ------------------------------------------------------------------
-# Polarity Weights — slight bias toward actionable signals
+# Asset Priority — loaded dynamically from config.TICKERS
 # ------------------------------------------------------------------
+# Do not hardcode here — tickers are per-user and configured in config.py / user_db.
+# Use get_primary_tickers() and get_watchlist_tickers() at runtime.
 
-POLARITY_WEIGHTS = {
-    'positive': 1.0,
-    'negative': 1.0,           # Risk signals equally important
-    'mixed': 0.8,
-    'neutral': 0.6,
-}
-
-# ------------------------------------------------------------------
-# Asset Priority — primary vs watchlist tickers
-# ------------------------------------------------------------------
-
-PRIMARY_TICKERS = {
-    'META', 'GOOGL', 'AMZN', 'AAPL', 'BABA', '700.HK',  # Internet
-    'MSFT', 'CRWD', 'ZS', 'PANW', 'NET', 'DDOG', 'SNOW', 'MDB',  # Software
-}
-
-WATCHLIST_TICKERS = {
-    'NFLX', 'SPOT', 'U', 'APP', 'RBLX',  # Internet watchlist
-    'NET', 'ORCL', 'PLTR', 'SHOP',  # Software watchlist
-}
+## TICKER Company Names Index (reference only)
+## META = Meta Platforms, Inc.
+## BABA = Alibaba Group Holding Limited
+## 700.HK = Tencent Holdings Ltd.
+## NET = Cloudflare, Inc.
+## MDB = MongoDB
 
 
-def get_ticker_weight(tickers: List[str]) -> float:
+def get_primary_tickers() -> set:
+    """Load primary tickers from config.TICKERS at runtime (not hardcoded)."""
+    import config
+    return set(
+        config.TICKERS.get('primary_internet', []) +
+        config.TICKERS.get('primary_software', [])
+    )
+
+
+def get_watchlist_tickers() -> set:
+    """Load watchlist tickers from config.TICKERS at runtime (not hardcoded)."""
+    import config
+    return set(
+        config.TICKERS.get('watchlist_internet', []) +
+        config.TICKERS.get('watchlist_software', [])
+    )
+
+
+def get_ticker_weight(
+    tickers: List[str],
+    primary_set: Optional[set] = None,
+    watchlist_set: Optional[set] = None,
+) -> float:
     """Return highest priority weight for a list of tickers."""
     if not tickers:
         return 0.5  # No ticker = sector/macro content
-    has_primary = any(t in PRIMARY_TICKERS for t in tickers)
-    has_watchlist = any(t in WATCHLIST_TICKERS for t in tickers)
+    if primary_set is None:
+        primary_set = get_primary_tickers()
+    if watchlist_set is None:
+        watchlist_set = get_watchlist_tickers()
+    has_primary = any(t in primary_set for t in tickers)
+    has_watchlist = any(t in watchlist_set for t in tickers)
     if has_primary:
         return 1.0
     elif has_watchlist:
@@ -169,13 +168,12 @@ RELEVANCE_THRESHOLD = 0.7
 def score_chunk(
     chunk: Chunk,
     classification: ChunkClassification,
-    source: str = 'jefferies',
+    source: str = 'unknown',
 ) -> float:
     """
     Compute relevance score for a classified chunk.
 
-    Score = category_weight × subtopic_weight × content_weight
-            × polarity_weight × ticker_weight × source_credibility
+    Score = category_weight × content_weight × ticker_weight × source_credibility
 
     Returns: float 0.0–1.0
     """
@@ -184,17 +182,8 @@ def score_chunk(
     if category_score == 0.0:
         return 0.0  # Irrelevant — hard filter
 
-    # Subtopic score (only for tmt_sector; others get 0.8 baseline)
-    if classification.category == 'tmt_sector' and classification.tmt_subtopic:
-        subtopic_score = SUBTOPIC_WEIGHTS.get(classification.tmt_subtopic, 0.5)
-    else:
-        subtopic_score = 0.8  # Baseline for non-sector content
-
     # Content type
     content_score = CONTENT_TYPE_WEIGHTS.get(classification.content_type, 0.7)
-
-    # Polarity
-    polarity_score = POLARITY_WEIGHTS.get(classification.polarity, 0.6)
 
     # Ticker relevance
     ticker_score = get_ticker_weight(classification.tickers)
@@ -202,14 +191,12 @@ def score_chunk(
     # Source credibility
     source_score = SOURCE_CREDIBILITY.get(source.lower(), 0.3)
 
-    # Weighted sum
+    # Weighted sum (category dominates; ticker and content drive secondary ranking)
     raw_score = (
-        category_score * 0.30 +
-        subtopic_score * 0.20 +
-        content_score * 0.15 +
-        polarity_score * 0.10 +
-        ticker_score * 0.15 +
-        source_score * 0.10
+        category_score * 0.45 +
+        content_score  * 0.25 +
+        ticker_score   * 0.20 +
+        source_score   * 0.10
     )
 
     return round(raw_score, 3)
@@ -218,7 +205,7 @@ def score_chunk(
 def filter_chunks(
     chunks: List[Chunk],
     classifications: List[ChunkClassification],
-    source: str = 'jefferies',
+    source: str = 'unknown',
     max_chunks: Optional[int] = None,
 ) -> List[Tuple[Chunk, ChunkClassification, float]]:
     """
@@ -292,11 +279,10 @@ if __name__ == "__main__":
             content_type="forecast",
             polarity="positive",
         ),
-        # Medium relevance: TMT sector, cloud subtopic
+        # Medium relevance: TMT sector
         ChunkClassification(
             chunk_id="2",
             category="tmt_sector",
-            tmt_subtopic="cloud_enterprise_software",
             content_type="fact",
             polarity="neutral",
         ),
@@ -335,7 +321,7 @@ if __name__ == "__main__":
     print("-" * 60)
 
     for clf in test_cases:
-        score = score_chunk(Chunk(chunk_id=clf.chunk_id), clf, 'jefferies')
+        score = score_chunk(Chunk(chunk_id=clf.chunk_id), clf)
         ticker = clf.tickers[0] if clf.tickers else "—"
         print(f"{clf.chunk_id:<4} {clf.category:<16} {ticker:<8} {clf.content_type:<14} {score:<6}")
 
@@ -361,7 +347,15 @@ if __name__ == "__main__":
     print("✓ Primary tickers prioritized over watchlist")
 
     # Source credibility check
-    assert SOURCE_CREDIBILITY['jefferies'] > SOURCE_CREDIBILITY['x']
-    print("✓ Source credibility: sell-side > social media")
+    assert SOURCE_CREDIBILITY['jefferies'] > SOURCE_CREDIBILITY['unknown']
+    print("✓ Source credibility: sell-side > unknown")
+
+    # Ticker getters should return non-empty sets
+    primary = get_primary_tickers()
+    watchlist = get_watchlist_tickers()
+    assert len(primary) > 0, "Primary tickers should not be empty"
+    assert len(watchlist) > 0, "Watchlist tickers should not be empty"
+    print(f"✓ Primary tickers loaded from config: {len(primary)} tickers")
+    print(f"✓ Watchlist tickers loaded from config: {len(watchlist)} tickers")
 
     print("\nConfig ready for V3 briefing pipeline.")

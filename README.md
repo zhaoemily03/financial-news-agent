@@ -101,8 +101,8 @@ The V3 briefing uses a **4-section purpose-driven layout**. Claims are routed by
 |---|---------|---------|--------|
 | 1 | Objective Breaking News | Per-ticker updates (max 3 each) + TMT sector-level | **Live** |
 | 2 | Synthesis Across Sources | LLM narrative: agreement, disagreement, source credibility | **Live** |
-| 3 | Macro Connections | Macro claims + explicit TMT linkage | **Phase 2 stub** |
-| 4 | Longitudinal Delta Detection | Drift signals, belief shifts over time | **Phase 2 stub** |
+| 3 | Macro Connections | Macro claims + explicit TMT linkage via `section3_synthesizer.py` | **Live** |
+| 4 | Longitudinal Delta Detection | Drift signals, belief shifts over time via `drift_detector.py` | **Live** |
 
 ### Section 1: Objective Breaking News
 - **Tracked tickers**: Iterates ALL tickers from `config.ALL_TICKERS`. Shows "No Update" for tickers with nothing. Only tickers in `ALL_TICKERS` are rendered — off-coverage company reports are routed to TMT Sector-Level instead.
@@ -118,11 +118,14 @@ The V3 briefing uses a **4-section purpose-driven layout**. Claims are routed by
 - No thesis language — describes patterns, doesn't recommend
 - **⚑ Potential Implications subsection**: second-pass LLM call through a secondaries analyst lens — surfaces comp dynamics, liquidity timing, and information asymmetry signals. Explicitly flagged as model-generated interpretation.
 
-### Section 3: Macro Connections (Phase 2)
-- Stub: shows count of macro claims filed. Full rendering coming later.
+### Section 3: Macro Connections
+- Deduplicated macro claims (cross-feed duplicate detection in `macro_news.py`)
+- LLM-generated TMT linkage narrative via `section3_synthesizer.py`
 
-### Section 4: Longitudinal Delta Detection (Phase 2)
-- Stub: drift detection runs and files signals, but rendering deferred.
+### Section 4: Longitudinal Delta Detection
+- Deterministic, no LLM — compares claim metadata across 7d/30d/90d windows
+- Surfaces: confidence shifts, belief flips, new disagreement, resurgence, attention decay
+- Trajectory string shown under each high-signal: "90d: high → 30d: high → 7d: medium → today: low"
 
 **Truncation rule:** If output exceeds ~5 pages, "No Update" lines are removed first.
 
@@ -320,7 +323,7 @@ python briefing_renderer.py
 The system uses **launchd** (macOS) for automation:
 
 - **Cookie refresh**: Runs at login + every 6 hours to keep portal sessions alive
-- **Daily briefing**: Runs at 7 AM or when Mac wakes from sleep
+- **Daily briefing**: Runs at 6 AM or when Mac wakes from sleep
 
 Plist files are installed in `~/Library/LaunchAgents/`.
 
@@ -331,7 +334,23 @@ Plist files are installed in `~/Library/LaunchAgents/`.
 ```
 financial-news-agent/
 ├── run_pipeline.py          # V3 pipeline orchestrator
+├── app.py                   # Flask web app factory (port 8080)
+├── user_db.py               # SQLite user management (users, config, briefings, auth_status)
 ├── refresh_cookies.py       # Automated cookie refresh (launchd)
+│
+├── # Web UI
+├── web/
+│   ├── auth.py              # Login/logout blueprint
+│   ├── views.py             # Dashboard, settings, history routes
+│   └── api.py               # AJAX endpoints (drilldown, auth-status, reauth)
+├── templates/               # Jinja2 templates
+│   ├── base.html            # Nav + auth alert banner
+│   ├── login.html
+│   ├── dashboard.html       # Morning + midday briefing view
+│   ├── settings.html        # Ticker + source toggle config
+│   └── history.html         # Past briefings list
+├── static/
+│   └── style.css            # Analyst-focused CSS, no external deps
 │
 ├── # Document Processing
 ├── schemas.py               # Document, Chunk, Claim dataclasses
@@ -416,7 +435,7 @@ Dynamically determined by who you follow in each portal ("Followed Notifications
 
 ## Current Status
 
-- [x] V3 4-section briefing pipeline (Sections 1+2 live, 3+4 stubbed)
+- [x] V3 4-section briefing pipeline (all 4 sections live)
 - [x] 4-category classifier (tracked_ticker, tmt_sector, macro, irrelevant)
 - [x] Off-coverage tickers route to TMT Sector-Level, not Tracked Tickers (classifier downgrade + renderer fix)
 - [x] Claims sorted by priority (breaking > contrarian first, no hard cap)
@@ -440,7 +459,7 @@ Dynamically determined by who you follow in each portal ("Followed Notifications
 - [x] Macro news collection (Reuters, CNBC via RSS)
 - [x] Document-level pre-filter (save LLM calls on non-TMT docs)
 - [ ] Jefferies scraping (auth issues — SSO cookies expire frequently)
-- [ ] Section 3: Macro Connections (Phase 2)
-- [ ] Section 4: Longitudinal Delta Detection rendering (Phase 2)
+- [x] Section 3: Macro Connections (macro claims + LLM TMT linkage via `section3_synthesizer.py`)
+- [x] Section 4: Longitudinal Delta Detection rendering (multi-window 7d/30d/90d, deterministic)
 - [ ] X (Twitter) ingestion (module ready, requires paid API tier)
 - [ ] Email delivery

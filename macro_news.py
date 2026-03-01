@@ -48,19 +48,52 @@ MACRO_RSS_FEEDS = [
     },
 ]
 
-# Keywords that indicate macro-relevant content
-MACRO_KEYWORDS = [
-    'fed', 'federal reserve', 'interest rate', 'rate cut', 'rate hike',
-    'inflation', 'cpi', 'pce', 'gdp', 'gross domestic',
-    'jobs', 'unemployment', 'nonfarm', 'payroll', 'labor market',
-    'tariff', 'trade war', 'trade deal', 'sanctions',
-    'treasury', 'bond yield', 'yield curve',
-    'regulation', 'antitrust', 'doj', 'ftc', 'eu regulation', 'sec ',
-    'china', 'geopolitical', 'war', 'conflict',
-    'recession', 'monetary policy', 'fiscal policy',
-    'oil price', 'commodity', 'supply chain',
-    'earnings season', 'market crash', 'volatility', 'vix',
+# Keywords split into priority tiers.
+# HIGH: US-China/geopolitics, TMT regulation, TMT blind spots — directly
+#       destabilizing for TMT portfolio assumptions; filled first.
+# LOWER: General macro backdrop — relevant context, fills remaining slots.
+# collect_macro_news fills HIGH quota first, then pads with LOWER.
+
+HIGH_PRIORITY_KEYWORDS = [
+    # US-China / TMT Geopolitics
+    'us-china', 'china tech', 'taiwan', 'chips act', 'entity list',
+    'semiconductor ban', 'decoupling', 'sanctions', 'cfius',
+    'tiktok', 'huawei', 'export control',
+
+    # Tariffs / Trade War (hits hardware margins and supply chains directly)
+    'tariff', 'trade war', 'trade restriction',
+
+    # TMT-Specific Regulation & Disruption
+    'antitrust', 'doj', 'ftc', 'sec ', 'ai regulation',
+    'data privacy', 'big tech', 'eu ai act', 'digital markets act',
+
+    # TMT Blind Spots Worth Tracking
+    'spectrum auction', 'cloud spending', 'ad spending',
+    'capex guidance', 'ai capex', 'hyperscaler', 'data center',
+    'nvidia', 'openai', 'anthropic', 'gemini',
 ]
+
+LOWER_PRIORITY_KEYWORDS = [
+    # Fed / Monetary Policy
+    'fed', 'federal reserve', 'interest rate', 'rate cut', 'rate hike',
+    'fomc', 'jerome powell', 'monetary policy',
+
+    # Consumer Strength
+    'consumer spending', 'consumer confidence', 'retail sales',
+
+    # US Political Risk
+    'executive order', 'government shutdown', 'debt ceiling', 'election',
+
+    # Supply Chain
+    'supply chain', 'reshoring', 'domestic manufacturing',
+
+    # Macro Backdrop
+    'inflation', 'cpi', 'gdp', 'recession', 'unemployment',
+    'treasury', 'bond yield', 'vix', 'volatility',
+]
+
+# Combined for single-list lookups (e.g. in tests)
+MACRO_KEYWORDS = HIGH_PRIORITY_KEYWORDS + LOWER_PRIORITY_KEYWORDS
 
 
 # ------------------------------------------------------------------
@@ -68,9 +101,19 @@ MACRO_KEYWORDS = [
 # ------------------------------------------------------------------
 
 def _matches_macro_keywords(text: str) -> bool:
-    """Check if text contains any macro keyword (case-insensitive)."""
+    """True if text contains any macro keyword (case-insensitive)."""
     text_lower = text.lower()
     return any(kw in text_lower for kw in MACRO_KEYWORDS)
+
+
+def _priority_score(text: str) -> int:
+    """
+    Return 1 for high-priority (TMT-direct: geopolitics, regulation, blind spots),
+    0 for lower-priority (general macro backdrop).
+    Used to fill high-priority quota first when capping collected articles.
+    """
+    text_lower = text.lower()
+    return 1 if any(kw in text_lower for kw in HIGH_PRIORITY_KEYWORDS) else 0
 
 
 def _clean_html(text: str) -> str:
@@ -125,8 +168,9 @@ def _fetch_feed(feed_config: Dict, days: int = 1, max_articles: int = 10) -> Lis
         if not title:
             continue
 
-        # Macro keyword filter
         combined = f"{title} {summary}"
+
+        # Macro keyword filter
         if not _matches_macro_keywords(combined):
             continue
 
@@ -138,12 +182,52 @@ def _fetch_feed(feed_config: Dict, days: int = 1, max_articles: int = 10) -> Lis
             'source': 'macro_news',
             'date': pub_date.strftime('%Y-%m-%d'),
             'content': f"{title}\n\n{summary}\n\n[Source: {feed_config['source']}]",
+            '_priority': _priority_score(combined),  # stripped before pipeline ingestion
         })
 
         if len(articles) >= max_articles:
             break
 
     return articles
+
+
+# ------------------------------------------------------------------
+# Deduplication (cross-feed same-story removal)
+# ------------------------------------------------------------------
+
+def _deduplicate_articles(articles: List[Dict]) -> List[Dict]:
+    """
+    Remove near-duplicate articles across feeds.
+    Reuters and CNBC often cover the same story; deduplicate by title word overlap.
+    Two articles are considered duplicates if ≥50% of significant title words overlap.
+    """
+    STOP_WORDS = {
+        'the', 'a', 'an', 'of', 'in', 'on', 'at', 'to', 'for', 'is', 'are',
+        'was', 'were', 'be', 'by', 'as', 'its', 'it', 'from', 'with', 'that',
+        'this', 'than', 'but', 'and', 'or', 'not', 'says', 'said', 'new',
+    }
+
+    def sig(title: str) -> frozenset:
+        words = re.sub(r'[^\w\s]', '', title.lower()).split()
+        return frozenset(w for w in words if w not in STOP_WORDS and len(w) > 3)
+
+    seen_sigs = []
+    unique = []
+    for article in articles:
+        s = sig(article['title'])
+        if not s:
+            unique.append(article)
+            continue
+        is_dup = any(
+            len(s & prior) / max(len(s | prior), 1) >= 0.5
+            for prior in seen_sigs
+        )
+        if not is_dup:
+            seen_sigs.append(s)
+            unique.append(article)
+        else:
+            print(f"  ✗ Dedup: {article['title'][:60]} ({article['analyst']})")
+    return unique
 
 
 # ------------------------------------------------------------------
@@ -180,9 +264,20 @@ def collect_macro_news(
         else:
             print(f"  ⚠ {feed_config['name']}: no macro articles found")
 
-    # Cap total
+    # Deduplicate cross-feed same-story coverage before capping
+    before_dedup = len(all_articles)
+    all_articles = _deduplicate_articles(all_articles)
+    if len(all_articles) < before_dedup:
+        print(f"  ✓ Dedup: {before_dedup} → {len(all_articles)} articles ({before_dedup - len(all_articles)} removed)")
+
+    # Sort HIGH-priority articles to the front, then cap total
+    all_articles.sort(key=lambda a: -a.get('_priority', 0))
     if len(all_articles) > max_articles:
         all_articles = all_articles[:max_articles]
+
+    # Strip internal priority tag before pipeline ingestion
+    for a in all_articles:
+        a.pop('_priority', None)
 
     return all_articles
 

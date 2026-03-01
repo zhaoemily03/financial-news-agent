@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Briefing History{% endblock %}
+
+{% block content %}
+<div class="history-page">
+  <h2>Briefing History</h2>
+
+  {% if briefings %}
+  <table class="history-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Run</th>
+        <th>Words</th>
+        <th>Generated</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% set seen_dates = [] %}
+      {% for b in briefings %}
+      <tr {% if b.date not in seen_dates %}class="date-row"{% endif %}>
+        <td>
+          {% if b.date not in seen_dates %}
+            {{ b.date }}
+            {% if b.date == today %}
+              <span class="badge-today">Today</span>
+            {% endif %}
+            {% set _ = seen_dates.append(b.date) %}
+          {% endif %}
+        </td>
+        <td>
+          {% if b.run_type == 'morning' %}Morning{% else %}<span class="midday-label">Midday</span>{% endif %}
+        </td>
+        <td class="muted">{{ b.word_count or '—' }}</td>
+        <td class="muted">{{ b.created_at[:16] if b.created_at else '—' }}</td>
+        <td><a href="{{ url_for('views.dashboard_date', target_date=b.date) }}">View</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">
+    <p>No briefings stored yet.</p>
+    <p class="muted">Briefings are generated automatically at 6:00 AM ET, or run the pipeline manually:</p>
+    <pre>python run_pipeline.py</pre>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

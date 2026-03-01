@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Daily Briefing{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<nav class="topnav">
+  <span class="nav-brand">Daily Briefing</span>
+  <div class="nav-links">
+    {% if session.user_id %}
+      <a href="{{ url_for('views.dashboard') }}" {% if request.endpoint and 'dashboard' in request.endpoint %}class="active"{% endif %}>Briefing</a>
+      <a href="{{ url_for('views.history') }}" {% if request.endpoint == 'views.history' %}class="active"{% endif %}>History</a>
+      <a href="{{ url_for('views.settings') }}" {% if request.endpoint == 'views.settings' %}class="active"{% endif %}>Settings</a>
+      <span class="nav-user">{{ session.display_name }}</span>
+      <form method="post" action="{{ url_for('auth.logout') }}" style="display:inline">
+        <button type="submit" class="btn-link">Sign out</button>
+      </form>
+    {% endif %}
+  </div>
+</nav>
+
+<!-- Auth alert banner — polls every 5min via htmx in Phase 3 -->
+{% if session.user_id %}
+<div id="auth-alerts">
+  {# Phase 3: hx-get="/api/auth-status" hx-trigger="load, every 300s" hx-swap="innerHTML" #}
+</div>
+{% endif %}
+
+{% with messages = get_flashed_messages() %}
+  {% if messages %}
+  <div class="flash-container">
+    {% for msg in messages %}
+    <div class="flash">{{ msg }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+{% endwith %}
+
+<main class="content">
+  {% block content %}{% endblock %}
+</main>
+
+</body>
+</html>

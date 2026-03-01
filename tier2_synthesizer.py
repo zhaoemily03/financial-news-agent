@@ -27,13 +27,13 @@ import os
 from typing import List, Optional, Tuple
 from dataclasses import dataclass, field
 from collections import defaultdict
-from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from claim_extractor import ClaimOutput
 from analyst_config_tmt import SOURCE_CREDIBILITY, SELL_SIDE_SOURCES, INDEPENDENT_SOURCES, SOURCE_BIAS_NOTES
+from llm_client import llm_complete, is_configured
 
 # ------------------------------------------------------------------
 # Result Dataclasses
@@ -321,9 +321,11 @@ def _detect_theme_disagreements(claims: List[ClaimOutput]) -> List[DisagreementC
 # LLM Narrative Generation (Section 2)
 # ------------------------------------------------------------------
 
-NARRATIVE_SYSTEM_PROMPT = """You are a hedge fund analyst reading across all materials for a daily TMT briefing.
+NARRATIVE_SYSTEM_PROMPT = """You are a hedge fund analyst reading across all materials for a daily TMT briefing 
+with the objective to build conviction on how to continually balance the portfolio to maximize financial returns.
 
-Your job: Compare perspectives ACROSS SOURCE TYPES — do NOT summarize sequentially, and do NOT
+Your job: Compare perspectives ACROSS SOURCE TYPES and draw out the insights with greatest potential impact on portfolio-balancing conviction 
+— do NOT summarize sequentially, and do NOT
 only compare sell-side sources against each other.
 
 SOURCE BIAS CONTEXT (critical):
@@ -335,10 +337,11 @@ SOURCE BIAS CONTEXT (critical):
 - Sell-side unanimity is not reassuring — it often reflects shared incentives, not shared facts.
 
 PRIORITY ORDER FOR SYNTHESIS:
-1. FIRST: Surface any point where independent sources (Substack, podcasts) and sell-side DIVERGE.
+1. FIRST: Surface insights from sources with greatest potential impact on portfolio-balancing conviction 
+2. SECOND: Surface any point where independent sources (Substack, podcasts) and sell-side DIVERGE.
    This is the most actionable tension in the briefing. Name the sources explicitly.
-2. SECOND: Surface disagreements BETWEEN sell-side firms on the same name or theme.
-3. THIRD: Surface where all sources (including independent) converge — this is the strongest signal.
+2. THIRD: Surface disagreements BETWEEN sell-side firms on the same name or theme.
+3. FOURTH: Surface where all sources (including independent) converge — this is the strongest signal.
 
 WHAT TO SURFACE:
 - Sell-side vs independent divergence — independent source raises concern sell-side ignores, or vice versa
@@ -353,18 +356,18 @@ SENTIMENT DRIFT:
 - If tone has NOT changed, state "No material drift" for that topic
 
 RULES:
-- Write in clear, connected prose (no bullet points, no headers)
+- Write in concise, connected prose (no bullet points, no headers)
 - Build arguments across paragraphs — each paragraph should flow into the next
 - Cite sources by name (e.g., "Jefferies notes...", "Substack's [Author] argues...")
 - Do NOT use thesis language: no "bullish", "bearish", "should", "recommend", "buy", "sell"
 - Do NOT add your own opinion or judgment
 - Do NOT repeat claims verbatim — synthesize across them
 - Keep total output under 750 words
-- Write for a professional analyst who has already read Section 1"""
+- Write for a professional Portfolio Manager who has already read Section 1"""
 
 
-IMPLICATIONS_SYSTEM_PROMPT = """You are a secondaries market analyst reviewing TMT research for implications
-relevant to private market secondaries transactions.
+IMPLICATIONS_SYSTEM_PROMPT = """You are a secondaries market senior analyst reviewing TMT research for implications
+relevant to private market secondaries transactions, who is actively pitching and helping to rebalance portfolio sizing in a tight team of four people.
 
 Given today's synthesis of sell-side and independent research, surface implications for
 secondaries pricing, deal flow, and portfolio risk. Frame everything as observations and
@@ -385,7 +388,7 @@ RULES:
 - Use conditional/observational language: "if X, then Y could follow" — not "X will happen"
 - Do NOT use thesis language: no "bullish", "bearish", "should", "recommend", "buy", "sell"
 - Do NOT repeat what was in the synthesis — go one level deeper into implications
-- Keep output under 250 words, 1-2 focused paragraphs
+- Keep output under 150 words, 1 focused paragraph
 - This output will be clearly flagged as model-generated interpretation; the analyst applies
   their own judgment"""
 
@@ -476,7 +479,6 @@ def generate_section2_narrative(
     agreements: List[AgreementCluster],
     disagreements: List[DisagreementCluster],
     no_disagreement: bool = False,
-    client: Optional[OpenAI] = None,
 ) -> str:
     """
     Generate narrative prose for Section 2 via LLM.
@@ -484,16 +486,14 @@ def generate_section2_narrative(
     Returns: 2-3 paragraph markdown string.
     Falls back to structured bullets if no API key.
     """
-    if client is None:
-        if not os.getenv("OPENAI_API_KEY"):
-            return _fallback_narrative(agreements, disagreements, no_disagreement)
-        client = OpenAI()
+    if not is_configured("synthesis"):
+        return _fallback_narrative(agreements, disagreements, no_disagreement)
 
     prompt = _build_narrative_prompt(claims, agreements, disagreements, no_disagreement)
 
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
+    return llm_complete(
+        "synthesis",
+        [
             {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
@@ -501,13 +501,10 @@ def generate_section2_narrative(
         max_tokens=1000,  # ~750 words
     )
 
-    return response.choices[0].message.content.strip()
-
 
 def generate_implications_narrative(
     claims: List[ClaimOutput],
     synthesis_narrative: str,
-    client: Optional[OpenAI] = None,
 ) -> str:
     """
     Generate secondaries-relevant implications from today's claims.
@@ -516,12 +513,7 @@ def generate_implications_narrative(
     Returns: 1-2 paragraph markdown string, flagged as non-objective.
     Returns "" if no API key (implications are bonus, not core).
     """
-    if client is None:
-        if not os.getenv("OPENAI_API_KEY"):
-            return ""
-        client = OpenAI()
-
-    if not claims:
+    if not is_configured("synthesis") or not claims:
         return ""
 
     # Build a compact prompt: synthesis already seen + claims for context
@@ -537,19 +529,15 @@ def generate_implications_narrative(
     lines.append("")
     lines.append("Write 1-2 paragraphs on secondaries-relevant implications. Conditional language only.")
 
-    prompt = '\n'.join(lines)
-
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
+    return llm_complete(
+        "synthesis",
+        [
             {"role": "system", "content": IMPLICATIONS_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": '\n'.join(lines)},
         ],
         temperature=0.4,
         max_tokens=400,  # ~250 words
     )
-
-    return response.choices[0].message.content.strip()
 
 
 def _fallback_narrative(
@@ -587,7 +575,6 @@ def _fallback_narrative(
 
 def synthesize_section2(
     claims: List[ClaimOutput],
-    client: Optional[OpenAI] = None,
 ) -> Section2Synthesis:
     """
     Synthesize Section 2: detect patterns deterministically,
@@ -595,7 +582,6 @@ def synthesize_section2(
 
     Args:
         claims: All claims for the day (any category)
-        client: Optional OpenAI client
 
     Returns:
         Section2Synthesis with narrative + structured data
@@ -611,12 +597,10 @@ def synthesize_section2(
     disagreements, no_disagreement = _detect_disagreements(claims)
 
     # LLM narrative generation
-    narrative = generate_section2_narrative(
-        claims, agreements, disagreements, no_disagreement, client
-    )
+    narrative = generate_section2_narrative(claims, agreements, disagreements, no_disagreement)
 
     # Second-pass implications (secondaries lens, flagged non-objective)
-    implications = generate_implications_narrative(claims, narrative, client)
+    implications = generate_implications_narrative(claims, narrative)
 
     return Section2Synthesis(
         narrative=narrative,

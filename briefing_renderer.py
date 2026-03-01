@@ -22,6 +22,8 @@ from collections import defaultdict
 
 from claim_extractor import ClaimOutput
 from tier2_synthesizer import Section2Synthesis
+from section3_synthesizer import Section3Synthesis
+from drift_detector import DriftReport
 from classifier import TMT_SUBTOPICS
 from analyst_config_tmt import HIGH_ALERT_EVENT_TYPES
 import config
@@ -159,36 +161,121 @@ def _render_section2(synthesis: Section2Synthesis) -> str:
 
 
 # ------------------------------------------------------------------
-# Section 3: Macro Connections (Phase 2 Stub)
+# Section 3: Macro Connections
 # ------------------------------------------------------------------
 
-def _render_section3(macro_claims: List[ClaimOutput]) -> str:
-    """Section 3: Stub for Phase 2."""
+def _render_section3(
+    macro_claims: List[ClaimOutput],
+    synthesis: Optional[Section3Synthesis] = None,
+) -> str:
+    """
+    Section 3: Deduplicated macro signals + LLM TMT linkage narrative.
+    Claims are listed first; narrative adds portfolio-level connections.
+    """
     lines = []
     lines.append("## 3. Macro Connections")
+    lines.append("*Global macro signals and TMT portfolio linkages*\n")
 
-    if macro_claims:
-        lines.append(f"*{len(macro_claims)} macro claims filed. Full rendering coming in Phase 2.*\n")
-        # Show brief preview of macro claims
-        for claim in macro_claims[:3]:
-            lines.append(f"- {claim.bullets[0]}")
-            if claim.sector_implication:
-                lines.append(f"  *TMT link: {claim.sector_implication}*")
-    else:
-        lines.append("*Macro Connections — coming in Phase 2*")
+    if not macro_claims:
+        lines.append("*No macro signals collected today.*")
+        return '\n'.join(lines)
+
+    # List each macro claim with its existing sector_implication annotation
+    # (sorting and capping already applied upstream in run_pipeline.py)
+    for claim in macro_claims:
+        lines.append(f"- **{claim.bullets[0]}**")
+        if claim.sector_implication:
+            lines.append(f"  *TMT: {claim.sector_implication}*")
+        lines.append(f"  *— {claim.source_citation}*")
+    lines.append("")
+
+    # LLM narrative: portfolio-level linkages (flagged model-generated)
+    if synthesis and synthesis.has_content():
+        lines.append("### Portfolio Linkages")
+        lines.append(
+            "*Model-generated — challenge or discard as appropriate. Not a recommendation.*\n"
+        )
+        lines.append(synthesis.narrative)
 
     return '\n'.join(lines)
 
 
 # ------------------------------------------------------------------
-# Section 4: Longitudinal Delta Detection (Phase 2 Stub)
+# Section 4: Longitudinal Delta Detection
 # ------------------------------------------------------------------
 
-def _render_section4() -> str:
-    """Section 4: Stub for Phase 2."""
+_WINDOW_LABELS = {7: "past week", 30: "past month", 90: "past quarter"}
+_BELIEF_DIR = {
+    'confirms_consensus': 'consensus-aligned',
+    'contradicts_consensus': 'contrarian',
+    'contradicts_prior_assumptions': 'challenging prior assumptions',
+}
+_CONF_ORDER = {'low': 0, 'medium': 1, 'high': 2}
+
+
+def _drift_narrative(signal) -> str:
+    """Convert a DriftSignal to a readable natural-language sentence."""
+    ticker = signal.ticker or "TMT sector"
+    window = _WINDOW_LABELS.get(signal.window_days, f"past {signal.window_days}d")
+
+    def clip(text, n=90):
+        if not text:
+            return ""
+        text = text.strip()
+        return text[:n].rstrip('.,; ') + ("…" if len(text) > n else "")
+
+    if signal.drift_type == 'confidence_shift':
+        today_n = _CONF_ORDER.get(signal.today_confidence or '', 1)
+        prior_n = _CONF_ORDER.get(signal.prior_confidence or '', 1)
+        direction = "softened" if today_n < prior_n else "hardened"
+        sentence = f"**{ticker}**: Over the {window}, conviction has {direction}"
+        if signal.prior_claim:
+            sentence += f" — previously: \"{clip(signal.prior_claim)}\""
+        if signal.today_claim:
+            sentence += f"; now: \"{clip(signal.today_claim)}\""
+        if signal.cross_window_context:
+            sentence += f" ({signal.cross_window_context})"
+        return sentence
+
+    if signal.drift_type == 'belief_flip':
+        prior_dir = _BELIEF_DIR.get(signal.prior_belief_pressure or '', 'unclear stance')
+        today_dir = _BELIEF_DIR.get(signal.today_belief_pressure or '', 'unclear stance')
+        sentence = f"**{ticker}**: Over the {window}, direction reversed — sources shifted from {prior_dir} to {today_dir}"
+        if signal.prior_claim:
+            sentence += f" (previously: \"{clip(signal.prior_claim, 75)}\""
+        if signal.today_claim:
+            sentence += f"; now: \"{clip(signal.today_claim, 75)}\")"
+        return sentence
+
+    if signal.drift_type == 'new_disagreement':
+        return f"**{ticker}**: Sources now split — {signal.today_claim}"
+
+    # Fallback for any future signal types
+    return f"**{ticker}**: {signal.description}"
+
+
+def _render_section4(drift_report: Optional[DriftReport] = None) -> str:
+    """
+    Section 4: Sentiment drift signals written as natural-language bullets.
+    No LLM — deterministic metadata comparison from drift_detector.py.
+    Tracks conviction softening/hardening, belief flips, and new source disagreement.
+    Does NOT report publication frequency (not a reliable sentiment signal).
+    """
     lines = []
     lines.append("## 4. Longitudinal Delta Detection")
-    lines.append("*Longitudinal Delta Detection — coming in Phase 2*")
+    lines.append("*Sentiment drift vs prior periods — deterministic, no AI*\n")
+
+    if drift_report is None:
+        lines.append("*No historical data yet — baseline builds after the first run.*")
+        return '\n'.join(lines)
+
+    if not drift_report.has_signals():
+        lines.append("*No sentiment drift detected vs prior periods.*")
+        return '\n'.join(lines)
+
+    for signal in drift_report.signals:
+        lines.append(f"- {_drift_narrative(signal)}")
+
     return '\n'.join(lines)
 
 
@@ -200,14 +287,21 @@ def render_briefing(
     claims: List[ClaimOutput],
     section2_synthesis: Section2Synthesis,
     briefing_date: Optional[date] = None,
+    section3_synthesis: Optional[Section3Synthesis] = None,
+    drift_report: Optional[DriftReport] = None,
+    macro_claims: Optional[List[ClaimOutput]] = None,
 ) -> str:
     """
     Render V3 4-section briefing.
 
     Args:
-        claims: All claims (any category, already capped)
+        claims: All claims (any category)
         section2_synthesis: Section2Synthesis from tier2_synthesizer
         briefing_date: Date for header (defaults to today)
+        section3_synthesis: Section3Synthesis from section3_synthesizer (optional)
+        drift_report: DriftReport from drift_detector (optional)
+        macro_claims: Pre-sorted, pre-capped macro claim list for Section 3.
+            If provided, used directly. If None, extracted from claims (fallback).
 
     Returns:
         Markdown string (<5 pages)
@@ -217,7 +311,9 @@ def render_briefing(
 
     # Split claims by category for routing
     section1_claims = [c for c in claims if c.category in ('tracked_ticker', 'tmt_sector')]
-    macro_claims = [c for c in claims if c.category == 'macro']
+    # Use pre-capped macro_claims if provided (pipeline ensures synthesis + display are coherent)
+    if macro_claims is None:
+        macro_claims = [c for c in claims if c.category == 'macro']
 
     # Render sections
     output_sections = []
@@ -236,12 +332,12 @@ def render_briefing(
     output_sections.append(_render_section2(section2_synthesis))
     output_sections.append("---\n")
 
-    # Section 3: Macro Connections (stub)
-    output_sections.append(_render_section3(macro_claims))
+    # Section 3: Macro Connections
+    output_sections.append(_render_section3(macro_claims, section3_synthesis))
     output_sections.append("---\n")
 
-    # Section 4: Longitudinal Delta Detection (stub)
-    output_sections.append(_render_section4())
+    # Section 4: Longitudinal Delta Detection
+    output_sections.append(_render_section4(drift_report))
 
     # Assemble
     output = '\n'.join(output_sections)

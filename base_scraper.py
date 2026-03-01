@@ -586,8 +586,18 @@ class BaseScraper(ABC):
         return None
 
     def filter_by_date(self, reports: List[Dict], days: int = 7) -> List[Dict]:
-        """Keep only reports published within the last N days."""
-        cutoff = datetime.now() - timedelta(days=days)
+        """
+        Keep reports dated yesterday or later (in local time / PT).
+
+        Cutoff = yesterday midnight: includes yesterday's after-hours US reports,
+        today's reports, and any future-dated reports from Asia-timezone analysts
+        ('tomorrow' in PT). Excludes reports from 2+ days ago, which prevents
+        stale dedup entries from blocking re-ingestion.
+
+        Note: 'days' param is kept for interface compat but the effective window
+        is always yesterday-midnight onward (matching Jefferies' internal cutoff logic).
+        """
+        cutoff = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
         recent = []
 
         for report in reports:
@@ -601,7 +611,7 @@ class BaseScraper(ABC):
             except:
                 recent.append(report)
 
-        print(f"  Date filter: {len(recent)} of {len(reports)} reports from last {days} days")
+        print(f"  Date filter: {len(recent)} of {len(reports)} reports from last 2 days")
         return recent
 
     # ------------------------------------------------------------------

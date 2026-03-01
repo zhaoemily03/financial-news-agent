@@ -2,75 +2,54 @@
 UBS Neo Research Portal Scraper
 
 Workflow:
-1. Login with email/password (no 2FA, no cookies needed)
-2. For each ticker: type company name in top nav shadow DOM search bar → Enter
-3. Land on company page (/feed/stream/company/{RIC}/latest/company-research)
-4. Extract article links (/article/research/{ID}), filter to today only (±1 day for timezone)
-5. For each report: navigate to article URL → find PDF link → download
+1. Selenium login: email → Next → password → Next (no 2FA, no cookies needed)
+2. driver.get("https://neo.ubs.com/feed/all") → All Follows feed
+3. Parse article cards from DOM: title, date, analyst, href (actual article URL)
+4. filter_by_date: today + tomorrow PST (Chinese-timezone analysts publish "tomorrow" PST)
+5. For each article: driver.get(href) → scroll → click "Access document" → PDF tab → extract
 
-Inherits from BaseScraper for shared auth/PDF functionality.
+Pure Selenium after login — no requests session needed for content.
 """
 
 import os
-import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Optional
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 
 from base_scraper import BaseScraper
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
 from selenium import webdriver
-from dateutil import parser as dateparser
-import config
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# Ticker → company name mapping for UBS search
-# UBS search bar expects company names, not just ticker symbols
-TICKER_COMPANY_NAMES = {
-    'META': 'Meta Platforms',
-    'GOOGL': 'Alphabet',
-    'AMZN': 'Amazon',
-    'AAPL': 'Apple',
-    'BABA': 'Alibaba',
-    '700.HK': 'Tencent',
-    'MSFT': 'Microsoft',
-    'CRWD': 'CrowdStrike',
-    'ZS': 'Zscaler',
-    'PANW': 'Palo Alto Networks',
-    'NET': 'Cloudflare',
-    'DDOG': 'Datadog',
-    'SNOW': 'Snowflake',
-    'MDB': 'MongoDB',
-    'NFLX': 'Netflix',
-    'SPOT': 'Spotify',
-    'U': 'Unity Software',
-    'APP': 'AppLovin',
-    'RBLX': 'Roblox',
-    'ORCL': 'Oracle',
-    'PLTR': 'Palantir',
-    'SHOP': 'Shopify',
-}
+_FEED_URL = "https://neo.ubs.com/feed/all"
 
 
 class UBSScraper(BaseScraper):
-    """Scraper for UBS Neo research portal — ticker-by-ticker search"""
+    """Scraper for UBS Neo — API-based follows feed, Selenium for login + content"""
 
-    PORTAL_NAME = "ubs"
-    CONTENT_URL = "https://neo.ubs.com/home"
+    PORTAL_NAME    = "ubs"
+    CONTENT_URL    = "https://neo.ubs.com/home"
     PDF_STORAGE_DIR = "data/reports/ubs"
 
     def __init__(self, headless: bool = True):
         super().__init__(headless=headless)
-        self.email = os.getenv('UBS_EMAIL')
+        self.email    = os.getenv('UBS_EMAIL')
         self.password = os.getenv('UBS_PASSWORD')
+        self._fetched_articles: List[Dict] = []
 
     # ------------------------------------------------------------------
-    # Browser setup with login
+    # Cookie persistence: no-op (fresh login each run, no 2FA)
+    # ------------------------------------------------------------------
+
+    def _persist_cookies(self):
+        pass
+
+    # ------------------------------------------------------------------
+    # Browser init + login
     # ------------------------------------------------------------------
 
     def _init_driver(self) -> bool:
@@ -89,7 +68,6 @@ class UBSScraper(BaseScraper):
         self.driver.set_page_load_timeout(30)
         print(f"[{self.PORTAL_NAME}] Initialized Chrome WebDriver")
 
-        # No cookies — always log in fresh (no 2FA on UBS Neo)
         self.driver.get(self.CONTENT_URL)
         time.sleep(5)
 
@@ -100,17 +78,15 @@ class UBSScraper(BaseScraper):
         return False
 
     def _perform_login(self) -> bool:
-        """Login with UBS Neo 2-step flow: email → Next → password → Next"""
+        """2-step login: email → Next → password → Next"""
         try:
             print(f"[{self.PORTAL_NAME}] Attempting login...")
-            print(f"[{self.PORTAL_NAME}]   Current URL: {self.driver.current_url[:80]}")
             time.sleep(3)
 
-            # Step 1: Enter email — UBS uses id="email_input"
+            # Step 1: email field
             email_field = None
             for selector in ['#email_input', 'input[type="text"]', 'input[type="email"]']:
-                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for el in elements:
+                for el in self.driver.find_elements(By.CSS_SELECTOR, selector):
                     if el.is_displayed():
                         email_field = el
                         break
@@ -118,24 +94,21 @@ class UBSScraper(BaseScraper):
                     break
 
             if not email_field:
-                print(f"[{self.PORTAL_NAME}] ✗ Could not find email field")
+                print(f"[{self.PORTAL_NAME}] ✗ Email field not found")
                 return False
 
             email_field.clear()
             email_field.send_keys(self.email)
             print(f"[{self.PORTAL_NAME}]   Entered email")
             time.sleep(1)
-
-            # Step 2: Click "Next" button — UBS uses type=button so Enter key doesn't work
             self._click_ubs_next()
             time.sleep(4)
 
-            # Step 3: Enter password — name="password_input" becomes visible after Next
+            # Step 2: password field (appears after Next)
             password_field = None
-            for attempt in range(4):
+            for _ in range(4):
                 for selector in ['input[name="password_input"]', 'input[type="password"]']:
-                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    for el in elements:
+                    for el in self.driver.find_elements(By.CSS_SELECTOR, selector):
                         if el.is_displayed():
                             password_field = el
                             break
@@ -146,15 +119,13 @@ class UBSScraper(BaseScraper):
                 time.sleep(2)
 
             if not password_field:
-                print(f"[{self.PORTAL_NAME}] ✗ Could not find password field after Next")
+                print(f"[{self.PORTAL_NAME}] ✗ Password field not found")
                 return False
 
             password_field.clear()
             password_field.send_keys(self.password)
             print(f"[{self.PORTAL_NAME}]   Entered password")
             time.sleep(1)
-
-            # Step 4: Click "Next" again to submit password
             self._click_ubs_next()
             time.sleep(6)
 
@@ -165,8 +136,7 @@ class UBSScraper(BaseScraper):
                 print(f"[{self.PORTAL_NAME}] ✓ Login successful")
                 return True
 
-            print(f"[{self.PORTAL_NAME}] ✗ Login failed")
-            print(f"[{self.PORTAL_NAME}]   Final URL: {self.driver.current_url[:80]}")
+            print(f"[{self.PORTAL_NAME}] ✗ Login failed — URL: {self.driver.current_url[:80]}")
             return False
 
         except Exception as e:
@@ -174,10 +144,9 @@ class UBSScraper(BaseScraper):
             return False
 
     def _click_ubs_next(self) -> bool:
-        """Click the visible 'Next' button on UBS login (exact text match, JS click)"""
+        """Click the visible 'Next' button (JS click — UBS uses type=button, not submit)"""
         try:
-            btns = self.driver.find_elements(By.XPATH, "//button[normalize-space(text())='Next']")
-            for btn in btns:
+            for btn in self.driver.find_elements(By.XPATH, "//button[normalize-space(text())='Next']"):
                 if btn.is_displayed():
                     self.driver.execute_script("arguments[0].click();", btn)
                     print(f"[{self.PORTAL_NAME}]   Clicked Next")
@@ -187,48 +156,30 @@ class UBSScraper(BaseScraper):
         return False
 
     # ------------------------------------------------------------------
-    # Authentication
+    # Authentication check
     # ------------------------------------------------------------------
 
     def _check_authentication(self) -> bool:
         try:
-            current_url = self.driver.current_url.lower()
-            page_source = self.driver.page_source.lower()
-
-            # Negative: login redirects
-            login_indicators = [
-                'login', 'signin', 'sign-in', 'sso', 'saml',
-                'oauth', 'authenticate', 'microsoftonline'
-            ]
-            for indicator in login_indicators:
-                if indicator in current_url:
-                    return False
-
-            if 'sign in' in self.driver.title.lower() or 'login' in self.driver.title.lower():
+            url = self.driver.current_url.lower()
+            if any(x in url for x in ['login', 'signin', 'sign-in', 'sso', 'saml', 'oauth', 'authenticate', 'microsoftonline']):
                 return False
-
-            # Positive: UBS Neo content
-            auth_indicators = [
-                'research', 'logout', 'sign out', 'neo',
-                'analyst', 'equity', 'coverage', 'search'
-            ]
-            for indicator in auth_indicators:
-                if indicator in page_source:
-                    print(f"[{self.PORTAL_NAME}] ✓ Auth check: valid session")
-                    return True
-
-            if 'neo.ubs.com' in current_url and 'login' not in current_url:
+            if any(x in self.driver.title.lower() for x in ['sign in', 'login']):
+                return False
+            page = self.driver.page_source.lower()
+            if any(x in page for x in ['research', 'logout', 'sign out', 'neo', 'analyst', 'equity', 'coverage']):
+                print(f"[{self.PORTAL_NAME}] ✓ Auth check: valid session")
+                return True
+            if 'neo.ubs.com' in url and 'login' not in url:
                 print(f"[{self.PORTAL_NAME}] ✓ Auth check: on portal")
                 return True
-
             return False
-
         except Exception as e:
             print(f"[{self.PORTAL_NAME}] ✗ Auth check error: {e}")
             return False
 
     def close_driver(self):
-        """Close WebDriver without saving cookies (UBS re-authenticates fresh each run)."""
+        """Close WebDriver — no cookie persistence (fresh login each run)."""
         if self.driver:
             try:
                 self.driver.quit()
@@ -238,222 +189,268 @@ class UBSScraper(BaseScraper):
             print(f"[{self.PORTAL_NAME}] Closed WebDriver")
 
     def _restart_browser(self) -> bool:
-        """Override to allow extra time for Chrome to fully release resources before relaunching."""
-        print(f"[{self.PORTAL_NAME}] Restarting browser (batch boundary)...")
+        print(f"[{self.PORTAL_NAME}] Restarting browser...")
         self.close_driver()
-        time.sleep(6)  # UBS SPA leaves heavy Chrome processes — wait for full OS cleanup
+        time.sleep(6)
         if not self._init_driver():
             print(f"[{self.PORTAL_NAME}] ✗ Re-authentication failed after restart")
             self._write_auth_alert()
             return False
-        print(f"[{self.PORTAL_NAME}] ✓ Browser restarted successfully")
+        print(f"[{self.PORTAL_NAME}] ✓ Browser restarted")
         return True
 
     # ------------------------------------------------------------------
-    # Navigate — no-op (ticker search happens in extract)
+    # Feed scraping: pure Selenium, no API calls
     # ------------------------------------------------------------------
 
     def _navigate_to_notifications(self) -> bool:
-        """No-op — UBS uses ticker-by-ticker search instead of a feed"""
-        print(f"[{self.PORTAL_NAME}] ✓ Using ticker search approach")
+        """Navigate to All Follows feed and scrape article list from DOM."""
+        print(f"[{self.PORTAL_NAME}] Navigating to All Follows feed...")
+        try:
+            self.driver.get(_FEED_URL)
+            time.sleep(15)  # React SPA: wait for feed cards to render
+        except Exception as e:
+            print(f"[{self.PORTAL_NAME}] ✗ Feed navigation/load error: {e}")
+            return False
+
+        self._fetched_articles = self._scrape_feed_articles()
+        print(f"[{self.PORTAL_NAME}] ✓ Feed scraped: {len(self._fetched_articles)} articles found")
         return True
 
-    # ------------------------------------------------------------------
-    # Extract reports by searching each ticker
-    # ------------------------------------------------------------------
+    def _scrape_feed_articles(self) -> List[Dict]:
+        """
+        Feed card structure (from page source inspection):
+          - Article links have href matching /research/ or /article/ patterns
+          - Title is the <a> text itself
+          - Date and analyst are in sibling/parent container elements
 
-    def _extract_notifications(self) -> List[Dict]:
-        """Search each coverage ticker and extract analyst articles"""
-        from analyst_config_tmt import PRIMARY_TICKERS, WATCHLIST_TICKERS
-        all_reports = []
-        seen_urls = set()
+        Uses BeautifulSoup on page_source (more reliable than Selenium find_elements
+        for React SPAs where is_displayed() can be inconsistent).
+        """
+        import re
+        from dateutil import parser as dateparser
+        from bs4 import BeautifulSoup
 
-        # All covered tickers: primary + watchlist, deduplicated, sorted for consistency
-        tickers_to_search = sorted(PRIMARY_TICKERS | WATCHLIST_TICKERS)
+        DATE_RE = re.compile(
+            r'\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*'
+            r'\s+20\d{2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*'
+            r'\s+\d{1,2},?\s+20\d{2})\b', re.I
+        )
 
-        print(f"[{self.PORTAL_NAME}] Searching {len(tickers_to_search)} tickers...")
+        articles = []
+        seen_hrefs = set()
 
-        for i, ticker in enumerate(tickers_to_search, start=1):
-            company_name = TICKER_COMPANY_NAMES.get(ticker, ticker)
+        soup = BeautifulSoup(self.driver.page_source, 'html.parser')
 
-            # Crash detection — restart if Chrome died mid-run
-            if not self._is_browser_alive():
-                print(f"[{self.PORTAL_NAME}] Browser crashed — restarting before {ticker}...")
-                if not self._restart_browser():
-                    print(f"[{self.PORTAL_NAME}] ✗ Re-auth failed after crash — stopping")
-                    break
+        all_links = soup.find_all('a', href=True)
 
-            print(f"[{self.PORTAL_NAME}]   [{i}/{len(tickers_to_search)}] Searching: {ticker} ({company_name})")
+        # Article URLs on UBS Neo: /feed/all/article/research/{id}
+        # Skip: company filter pages (/articles?), author profiles (/profile/),
+        #        nav links (/feed/discover, /feed/stream, /feed/all exact)
+        ARTICLE_PATTERNS = ['/article/research/']
+        SKIP_PATTERNS = ['/feed/discover', '/feed/stream', '/feed/all/stream',
+                         '/articles?', '/profile/', '/home', '/login', '/settings',
+                         '#', 'javascript:']
 
-            reports = self._search_ticker(ticker, company_name, seen_urls)
-            all_reports.extend(reports)
-
-            if reports:
-                print(f"[{self.PORTAL_NAME}]     → {len(reports)} new articles")
-
-        print(f"[{self.PORTAL_NAME}] ✓ Total: {len(all_reports)} reports across {len(tickers_to_search)} tickers")
-        return all_reports
-
-    def _get_shadow_search_input(self):
-        """Find the search input inside the FC-MASTHEAD-SEARCH shadow DOM component"""
-        return self.driver.execute_script("""
-            function findInputInShadow(root) {
-                for (const el of root.querySelectorAll('*')) {
-                    if (el.shadowRoot) {
-                        const inp = el.shadowRoot.querySelector('input');
-                        if (inp) return inp;
-                        const nested = findInputInShadow(el.shadowRoot);
-                        if (nested) return nested;
-                    }
-                }
-                return null;
-            }
-            return findInputInShadow(document);
-        """)
-
-    def _search_ticker(self, ticker: str, company_name: str, seen_urls: set) -> List[Dict]:
-        """Type company name in top nav search bar → land on company page → extract articles"""
-        reports = []
-        # Only collect articles published today (±1 day for timezone differences)
-        cutoff = datetime.now() - timedelta(days=2)
-
-        try:
-            # Reuse the nav search bar from whatever page we're on — avoids a full home page load
-            # Only fall back to home if we've somehow left the portal entirely
-            if 'neo.ubs.com' not in self.driver.current_url:
-                self.driver.get(self.CONTENT_URL)
-                time.sleep(4)
-
-            search_input = self._get_shadow_search_input()
-            if not search_input:
-                print(f"[{self.PORTAL_NAME}]     ✗ Could not find nav search input")
-                return []
-
-            self.driver.execute_script("arguments[0].click();", search_input)
-            time.sleep(0.5)
-            # Clear any leftover text from the previous search, then type new company name
-            self.driver.execute_script("arguments[0].value = '';", search_input)
-            search_input.send_keys(company_name)
-            time.sleep(2)
-            search_input.send_keys(Keys.RETURN)
-            time.sleep(5)
-
-            # If search landed on results page instead of company page, click first company result
-            if '/feed/stream/company/' not in self.driver.current_url:
-                if '/search?' in self.driver.current_url:
-                    company_links = self.driver.find_elements(
-                        By.XPATH, "//a[contains(@href, '/feed/stream/company/')]"
-                    )
-                    if company_links:
-                        self.driver.execute_script("arguments[0].click();", company_links[0])
-                        time.sleep(4)
-                    else:
-                        print(f"[{self.PORTAL_NAME}]     ✗ No company results for {ticker}")
-                        return []
-                if '/feed/stream/company/' not in self.driver.current_url:
-                    print(f"[{self.PORTAL_NAME}]     ✗ Did not land on company page: {self.driver.current_url[:80]}")
-                    return []
-
-            # Scroll to load articles
-            self.driver.execute_script("window.scrollTo(0, 800);")
-            time.sleep(2)
-
-            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-            article_re = re.compile(r'/article/research/\w+$')
-            seen_ids = set()
-
-            for link in soup.find_all('a', href=True):
-                href = link.get('href', '')
-                if not article_re.search(href):
+        for a_tag in all_links:
+            try:
+                href = a_tag.get('href', '')
+                if not href:
                     continue
 
-                article_id = href.split('/')[-1]
-                if article_id in seen_ids:
+                # Build absolute URL
+                if href.startswith('http'):
+                    url = href
+                elif href.startswith('/'):
+                    url = 'https://neo.ubs.com' + href
+                else:
                     continue
-                seen_ids.add(article_id)
 
-                full_url = 'https://neo.ubs.com' + href if not href.startswith('http') else href
-                if full_url in seen_urls:
+                if url in seen_hrefs:
                     continue
-                seen_urls.add(full_url)
+                if any(p in href for p in SKIP_PATTERNS):
+                    continue
+                if not any(p in href for p in ARTICLE_PATTERNS):
+                    continue
 
-                title = link.get_text(strip=True)
+                title = a_tag.get_text(strip=True)
                 if not title or len(title) < 5:
                     continue
 
-                parent = link.find_parent(['div', 'li', 'article', 'section'])
-                analyst = self._extract_analyst_name(parent)
-                pub_date = self._extract_date(parent)
-
-                # Date filter: only today's articles (±1 day for timezone)
-                if pub_date and pub_date < cutoff:
+                # Skip financial model spreadsheets — not narrative research
+                if 'Company Model' in title:
                     continue
 
-                reports.append({
-                    'title': title[:200],
-                    'url': full_url,
+                # Walk up to find card container with date + analyst
+                parent = a_tag.find_parent(['div', 'li', 'article', 'section'])
+                container_text = parent.get_text(separator='\n', strip=True) if parent else ''
+
+                # Extract date from container
+                pub_date = None
+                date_m = DATE_RE.search(container_text)
+                if date_m:
+                    try:
+                        pub_date = dateparser.parse(date_m.group(1), fuzzy=True)
+                    except Exception:
+                        pass
+
+                # Extract analyst: line after the date line in container text
+                analyst = ''
+                if date_m:
+                    lines = [l.strip() for l in container_text.split('\n') if l.strip()]
+                    for idx, line in enumerate(lines):
+                        if DATE_RE.search(line):
+                            if idx + 1 < len(lines):
+                                candidate = lines[idx + 1]
+                                # Analyst name: not a date, not a region, not "Research..."
+                                if (not DATE_RE.search(candidate)
+                                        and 'Research' not in candidate
+                                        and len(candidate.split()) <= 4):
+                                    analyst = candidate
+                            break
+
+                seen_hrefs.add(url)
+                articles.append({
+                    'title':   title[:200],
+                    'url':     url,
+                    'date':    pub_date.strftime('%Y-%m-%d') if pub_date else None,
                     'analyst': analyst,
-                    'source': 'UBS',
-                    'date': pub_date.strftime('%Y-%m-%d') if pub_date else None,
-                    'ticker': ticker,
+                    'source':  'UBS',
                 })
+            except Exception:
+                continue
 
-        except Exception as e:
-            print(f"[{self.PORTAL_NAME}]     Error searching {ticker}: {e}")
+        if articles:
+            print(f"[{self.PORTAL_NAME}]   Found {len(articles)} articles: "
+                  f"{[a['title'][:50] for a in articles[:5]]}")
+        else:
+            try:
+                body_text = self.driver.find_element(By.TAG_NAME, 'body').text
+                import re as _re
+                m = _re.search(r'20\d{2}', body_text)
+                if m:
+                    idx = m.start()
+                    snippet = body_text[max(0, idx-60):idx+100]
+                else:
+                    snippet = body_text[:400]
+                print(f"[{self.PORTAL_NAME}] ⚠ No articles found after URL pattern filter.")
+                print(f"  Page snippet: {repr(snippet)}")
+            except Exception:
+                pass
 
-        return reports
+        return articles
 
-    def _extract_analyst_name(self, element) -> Optional[str]:
-        if not element:
-            return None
-        text = element.get_text(separator=' ')
-        patterns = [
-            r'by\s+([A-Z][a-z]+\s+[A-Z][a-z]+)',
-            r'([A-Z][a-z]+\s+[A-Z][a-z]+)\s+Research\s*[-–]',  # UBS: "Karl Keirstead Research -"
-            r'([A-Z][a-z]+\s+[A-Z][a-z]+)\s*[-–]',
-            r'Author:\s*([A-Z][a-z]+\s+[A-Z][a-z]+)',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                return match.group(1)
-        return None
-
-    def _extract_date(self, element) -> Optional[datetime]:
-        if not element:
-            return None
-        text = element.get_text()
-        date_patterns = [
-            r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4})',
-            r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})',
-            r'(\d{1,2}/\d{1,2}/\d{4})',
-            r'(\d{4}-\d{2}-\d{2})',
-        ]
-        for pattern in date_patterns:
-            match = re.search(pattern, text, re.I)
-            if match:
-                try:
-                    return dateparser.parse(match.group(1))
-                except:
-                    pass
-        return None
+    def _extract_notifications(self) -> List[Dict]:
+        return self._fetched_articles
 
     # ------------------------------------------------------------------
-    # Report navigation and content extraction
+    # Date filter override: today + tomorrow PST (not yesterday)
+    # ------------------------------------------------------------------
+
+    def filter_by_date(self, reports: List[Dict], days: int = 2) -> List[Dict]:
+        """
+        Keep reports dated today or later in PST.
+        'days' param ignored — UBS uses today-midnight PST as cutoff so that
+        Chinese-timezone analyst reports dated 'tomorrow' PST are included.
+        """
+        # today midnight in local time (system is PST)
+        cutoff = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        recent = []
+        for report in reports:
+            if not report.get('date'):
+                recent.append(report)
+                continue
+            try:
+                report_date = datetime.strptime(report['date'], '%Y-%m-%d')
+                if report_date >= cutoff:
+                    recent.append(report)
+            except Exception:
+                recent.append(report)
+        print(f"  Date filter: {len(recent)} of {len(reports)} reports from today+ (PST)")
+        return recent
+
+    # ------------------------------------------------------------------
+    # Content extraction: Selenium navigate → click "Access document" → PDF
     # ------------------------------------------------------------------
 
     def _navigate_to_report(self, report_url: str) -> bool:
+        """Navigate to the article page (URL comes from feed DOM — always correct)."""
+        if not report_url:
+            return False
         try:
             self.driver.get(report_url)
-            time.sleep(5)
+            time.sleep(8)  # React SPA render time
             return True
         except Exception as e:
-            print(f"    ✗ Error navigating to report: {e}")
+            print(f"    ✗ Navigation error: {e}")
             return False
 
+    def _click_access_document(self) -> Optional[str]:
+        """
+        Click the 'Access document' button on the article page.
+        The button opens the PDF in a new tab; captures and returns the PDF URL.
+        """
+        try:
+            # Scroll down a bit to reveal the "Access document" button
+            self.driver.execute_script("window.scrollBy(0, 400);")
+            time.sleep(1)
+
+            btn = None
+            for text in ['Access document', 'Access Document', 'Download PDF', 'View PDF']:
+                candidates = self.driver.find_elements(
+                    By.XPATH,
+                    f"//button[contains(., '{text}')] | //a[contains(., '{text}')]"
+                )
+                for el in candidates:
+                    if el.is_displayed():
+                        btn = el
+                        break
+                if btn:
+                    break
+
+            if not btn:
+                # Debug: print visible buttons and links to find the right text
+                all_btns = self.driver.find_elements(By.XPATH, "//button | //a")
+                visible_texts = [el.text.strip() for el in all_btns if el.is_displayed() and el.text.strip()][:20]
+                print(f"    ⚠ 'Access document' button not found. Visible buttons/links: {visible_texts}")
+                return None
+
+            original_handles = set(self.driver.window_handles)
+            self.driver.execute_script("arguments[0].click();", btn)
+            print(f"    → Clicked 'Access document'")
+            time.sleep(4)
+
+            # Check for new tab
+            new_handles = set(self.driver.window_handles) - original_handles
+            if new_handles:
+                new_tab = new_handles.pop()
+                self.driver.switch_to.window(new_tab)
+                pdf_url = self.driver.current_url
+                self.driver.close()
+                self.driver.switch_to.window(list(original_handles)[0])
+                print(f"    ✓ PDF tab: {pdf_url[:70]}...")
+                return pdf_url
+
+            # Check if PDF embedded in iframe/object on current page
+            for iframe in self.driver.find_elements(By.TAG_NAME, 'iframe'):
+                src = iframe.get_attribute('src') or ''
+                if '.pdf' in src.lower() or 'download' in src.lower():
+                    return src
+
+            # Check if current URL itself is the PDF
+            current = self.driver.current_url
+            if '.pdf' in current.lower():
+                return current
+
+            return None
+
+        except Exception as e:
+            print(f"    ✗ Access document error: {e}")
+            return None
+
     def _extract_report_content(self, report: Dict = None) -> Optional[str]:
-        # Try PDF first
-        pdf_url = self._get_pdf_url()
+        """Navigate to article → click 'Access document' → download and parse PDF."""
+        pdf_url = self._click_access_document()
         if pdf_url:
             self._sync_cookies_from_driver()
             pdf_bytes = self.download_pdf(pdf_url)
@@ -463,85 +460,9 @@ class UBSScraper(BaseScraper):
                     if pdf_path:
                         report['pdf_path'] = pdf_path
                 text = self.extract_text_from_pdf(pdf_bytes)
-                if text:
+                if text and len(text) > 200:
                     return text
-
-        # Fallback: page text
-        text = self._extract_text_from_page()
-        if text and len(text) > 500:
-            return text
-
         return None
-
-    def _get_pdf_url(self) -> Optional[str]:
-        try:
-            pdf_selectors = [
-                'a[href*=".pdf"]',
-                '[aria-label*="PDF"]',
-                '[aria-label*="Download"]',
-                '[title*="PDF"]',
-                'button[class*="pdf"]',
-                'a[class*="pdf"]',
-                'a[class*="download"]',
-            ]
-
-            for selector in pdf_selectors:
-                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for el in elements:
-                    if el.is_displayed():
-                        href = el.get_attribute('href')
-                        if href and '.pdf' in href.lower():
-                            print(f"    ✓ Found PDF link: {href[:60]}...")
-                            return href
-                        self.driver.execute_script("arguments[0].click();", el)
-                        time.sleep(2)
-
-            # Search page source
-            pdf_urls = re.findall(
-                r'(https?://[^\s"\']*\.pdf[^\s"\']*)', self.driver.page_source)
-            if pdf_urls:
-                print(f"    ✓ Found PDF URL in source: {pdf_urls[0][:60]}...")
-                return pdf_urls[0]
-
-            # Check iframes
-            iframes = self.driver.find_elements(By.TAG_NAME, 'iframe')
-            for iframe in iframes:
-                src = iframe.get_attribute('src') or ''
-                if '.pdf' in src.lower():
-                    return src
-
-            return None
-        except Exception as e:
-            print(f"    ⚠ Error getting PDF URL: {e}")
-            return None
-
-    def _extract_text_from_page(self) -> Optional[str]:
-        try:
-            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-            for element in soup(['script', 'style', 'nav', 'header', 'footer']):
-                element.decompose()
-
-            content_selectors = [
-                '.report-content', '.article-content', '.document-content',
-                '.research-content', 'article', 'main', '[role="main"]',
-            ]
-            for selector in content_selectors:
-                content = soup.select_one(selector)
-                if content:
-                    text = content.get_text(separator='\n', strip=True)
-                    if len(text) > 500:
-                        return text
-
-            body = soup.find('body')
-            if body:
-                lines = [l for l in body.get_text(separator='\n', strip=True).split('\n') if len(l) > 50]
-                if lines:
-                    return '\n'.join(lines)
-
-            return None
-        except Exception as e:
-            print(f"    ⚠ Error extracting page text: {e}")
-            return None
 
 
 # ------------------------------------------------------------------
@@ -554,46 +475,37 @@ if __name__ == "__main__":
     print("\nUBS Neo Scraper Test")
     print("=" * 50)
 
-    email = os.getenv('UBS_EMAIL')
+    email    = os.getenv('UBS_EMAIL')
     password = os.getenv('UBS_PASSWORD')
 
     if not email or not password:
-        print("✗ Missing UBS_EMAIL or UBS_PASSWORD in .env file")
+        print("✗ Missing UBS_EMAIL or UBS_PASSWORD in .env")
         sys.exit(1)
 
-    print(f"✓ Found credentials for: {email}")
+    print(f"✓ Credentials: {email}")
 
-    from analyst_config_tmt import PRIMARY_TICKERS, WATCHLIST_TICKERS
-    all_tickers = sorted(PRIMARY_TICKERS | WATCHLIST_TICKERS)
-    print(f"✓ Will search {len(all_tickers)} tickers: {', '.join(all_tickers)}")
-
-    print("\n[1/2] Initializing scraper...")
+    print("\n[1/2] Initializing scraper (headless=False for debugging)...")
     scraper = UBSScraper(headless=False)
 
     print("\n[2/2] Running full pipeline...")
-    result = scraper.get_followed_reports(max_reports=30, days=2)
+    result = scraper.get_followed_reports(max_reports=20, days=2)
 
     if result.get('auth_required'):
-        print("\n⚠ Authentication required - check credentials")
+        print("\n⚠ Authentication required — check credentials")
         sys.exit(1)
 
-    reports = result.get('reports', [])
+    reports  = result.get('reports', [])
     failures = result.get('failures', [])
 
     print(f"\n--- Results ---")
     print(f"Reports extracted: {len(reports)}")
     print(f"Failures: {len(failures)}")
 
-    # Group by ticker
-    by_ticker = {}
-    for r in reports:
-        t = r.get('ticker', 'unknown')
-        by_ticker.setdefault(t, []).append(r)
-
-    for t, reps in by_ticker.items():
-        print(f"\n  {t}: {len(reps)} articles")
-        for r in reps[:2]:
-            print(f"    - {r['title'][:60]}")
+    for i, r in enumerate(reports[:5], 1):
+        print(f"\n  [{i}] {r['title'][:70]}")
+        print(f"      Analyst: {r.get('analyst', 'unknown')}")
+        print(f"      Date:    {r.get('date', 'unknown')}")
+        print(f"      Content: {len(r.get('content', ''))} chars")
 
     if failures:
         print(f"\n--- Failures ---")

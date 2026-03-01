@@ -2,15 +2,14 @@
 Arete Research Portal Scraper
 
 Workflow:
-1. Login with cookies or username/password
+1. Login with username/password (no 2FA — no cookie storage needed)
 2. Navigate to home page
-3. Scrape "My Research" articles from home page
-4. For each report: navigate, extract content (text or PDF)
-5. Filter: last N days only, skip previously processed
+3. Scrape "My Ressearch" articles from home page
+4. For each article: extract direct PDF URL from the red Adobe icon next to the title
+5. Download PDF, extract text
+6. Filter: last N days only, skip previously processed
 
-Note: Arete uses a username (di.wu), not an email address.
-
-Inherits from BaseScraper for shared cookie/auth/PDF functionality.
+Inherits from BaseScraper for shared PDF/auth functionality.
 """
 
 import os
@@ -24,6 +23,7 @@ from dotenv import load_dotenv
 from base_scraper import BaseScraper
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.keys import Keys
 from selenium import webdriver
 from dateutil import parser as dateparser
 
@@ -31,7 +31,7 @@ load_dotenv()
 
 
 class AreteScraper(BaseScraper):
-    """Scraper for Arete research portal — My Research from home page"""
+    """Scraper for Arete research portal — My Ressearch section on home page"""
 
     PORTAL_NAME = "arete"
     CONTENT_URL = "https://portal.arete.net/"
@@ -41,6 +41,13 @@ class AreteScraper(BaseScraper):
         super().__init__(headless=headless)
         self.username = os.getenv('ARETE_USERNAME')
         self.password = os.getenv('ARETE_PASSWORD')
+
+    # ------------------------------------------------------------------
+    # Cookie persistence: no-op (Arete logs in fresh each run, no 2FA)
+    # ------------------------------------------------------------------
+
+    def _persist_cookies(self):
+        pass  # Fresh login every run — no cookie storage needed
 
     # ------------------------------------------------------------------
     # Browser setup with login
@@ -57,342 +64,246 @@ class AreteScraper(BaseScraper):
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument('--window-size=1920,1080')
-
         self.driver = webdriver.Chrome(options=chrome_options)
+        self.driver.set_page_load_timeout(30)
         print(f"[{self.PORTAL_NAME}] Initialized Chrome WebDriver")
 
-        # No cookies — always log in fresh (no 2FA on Arete)
         self.driver.get(self.CONTENT_URL)
         time.sleep(3)
 
         if self.username and self.password:
             return self._perform_login()
 
-        print(f"[{self.PORTAL_NAME}] ✗ No authentication method available")
+        print(f"[{self.PORTAL_NAME}] ✗ No credentials available")
         return False
 
     def _perform_login(self) -> bool:
-        """Login with username and password — 2-step flow (username → Next → password)"""
+        """Login: username and password are on the same page — fill both then Sign In"""
         try:
             print(f"[{self.PORTAL_NAME}] Attempting login...")
-            current_url = self.driver.current_url
-            print(f"[{self.PORTAL_NAME}]   Current URL: {current_url[:80]}")
-            time.sleep(3)
 
-            # Step 1: Find and fill username field
-            username_selectors = [
+            # Step 1: Fill username
+            username_field = self._find_visible_input([
                 'input[type="text"]', 'input[type="email"]',
                 'input[name="username"]', 'input[name="user"]',
-                'input[name="email"]', 'input[name="login"]',
-                'input[id="username"]', 'input[id="user"]',
+                'input[name="email"]', 'input[id="username"]',
                 'input[placeholder*="user" i]', 'input[placeholder*="email" i]',
-                'input:not([type="hidden"]):not([type="password"])',
-            ]
-            username_field = None
-            for selector in username_selectors:
-                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for el in elements:
-                    if el.is_displayed():
-                        username_field = el
-                        break
-                if username_field:
-                    break
-
+            ])
             if not username_field:
-                all_inputs = self.driver.find_elements(By.TAG_NAME, 'input')
-                print(f"[{self.PORTAL_NAME}]   DEBUG: {len(all_inputs)} inputs:")
-                for inp in all_inputs:
-                    print(f"    type={inp.get_attribute('type')} name={inp.get_attribute('name')} visible={inp.is_displayed()}")
-                print(f"[{self.PORTAL_NAME}] ✗ Could not find username field")
+                print(f"[{self.PORTAL_NAME}] ✗ Username field not found")
                 return False
 
             username_field.clear()
             username_field.send_keys(self.username)
-            print(f"[{self.PORTAL_NAME}]   Entered username")
-            time.sleep(1)
+            time.sleep(0.5)
 
-            # Step 2: Click "Next"
-            next_selectors = [
-                'input[type="submit"]', 'button[type="submit"]',
-                'button[class*="next"]', 'button[class*="login"]',
-                'button[class*="submit"]', 'button[class*="continue"]',
-                '.btn-primary', 'button',
-            ]
-            clicked_next = False
-            for selector in next_selectors:
-                buttons = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for btn in buttons:
-                    if btn.is_displayed():
-                        text = (btn.text or '').lower()
-                        btn_type = (btn.get_attribute('type') or '').lower()
-                        if btn_type == 'submit' or any(w in text for w in ['next', 'continue', 'log', 'sign', 'submit']):
-                            btn.click()
-                            clicked_next = True
-                            print(f"[{self.PORTAL_NAME}]   Clicked Next/Submit")
-                            time.sleep(3)
-                            break
-                if clicked_next:
-                    break
-            if not clicked_next:
-                from selenium.webdriver.common.keys import Keys
-                username_field.send_keys(Keys.RETURN)
-                time.sleep(3)
-
-            # Step 3: Find and fill password field (with retry)
-            password_field = None
-            for attempt in range(3):
-                for selector in ['input[type="password"]', 'input[name="password"]', 'input[name="passwd"]']:
-                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    for el in elements:
-                        if el.is_displayed():
-                            password_field = el
-                            break
-                    if password_field:
-                        break
-                if password_field:
-                    break
-                time.sleep(2)
-
+            # Step 2: Fill password (both fields visible on same page)
+            password_field = self._find_visible_input([
+                'input[type="password"]', 'input[name="password"]', 'input[name="passwd"]',
+            ])
             if not password_field:
-                print(f"[{self.PORTAL_NAME}] ✗ Could not find password field")
+                print(f"[{self.PORTAL_NAME}] ✗ Password field not found")
                 return False
 
             password_field.clear()
             password_field.send_keys(self.password)
-            print(f"[{self.PORTAL_NAME}]   Entered password")
-            time.sleep(1)
+            time.sleep(0.5)
 
-            # Step 4: Click sign in
-            clicked_submit = False
-            for selector in next_selectors:
-                buttons = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for btn in buttons:
-                    if btn.is_displayed():
-                        text = (btn.text or '').lower()
-                        btn_type = (btn.get_attribute('type') or '').lower()
-                        if btn_type == 'submit' or any(w in text for w in ['sign', 'log', 'submit', 'continue']):
-                            btn.click()
-                            clicked_submit = True
-                            print(f"[{self.PORTAL_NAME}]   Clicked Sign In")
-                            time.sleep(5)
-                            break
-                if clicked_submit:
-                    break
-            if not clicked_submit:
-                from selenium.webdriver.common.keys import Keys
+            # Step 3: Click Sign In
+            if not self._click_submit_button(['sign', 'log', 'submit']):
                 password_field.send_keys(Keys.RETURN)
-                time.sleep(5)
-
-            # Handle "Stay signed in?" prompt
-            try:
-                for btn in self.driver.find_elements(By.CSS_SELECTOR, '#idBtn_Back, #idSIButton9'):
-                    if btn.is_displayed():
-                        btn.click()
-                        time.sleep(2)
-                        break
-            except:
-                pass
+            time.sleep(5)
 
             if self._check_authentication():
                 print(f"[{self.PORTAL_NAME}] ✓ Login successful")
+                # PDFs redirect through research.arete.net — establish a session there first
+                print(f"[{self.PORTAL_NAME}] Establishing session on research.arete.net...")
+                self.driver.get('https://research.arete.net/')
+                time.sleep(5)  # Let the session fully initialize before first PDF request
+                self.driver.get(self.CONTENT_URL)
+                time.sleep(2)
                 return True
 
-            print(f"[{self.PORTAL_NAME}] ✗ Login failed")
-            print(f"[{self.PORTAL_NAME}]   Final URL: {self.driver.current_url[:80]}")
+            print(f"[{self.PORTAL_NAME}] ✗ Login failed — URL: {self.driver.current_url[:80]}")
             return False
 
         except Exception as e:
             print(f"[{self.PORTAL_NAME}] ✗ Login error: {e}")
             return False
 
+    def _find_visible_input(self, selectors: List[str]):
+        """Return the first visible input matching any of the given CSS selectors."""
+        for selector in selectors:
+            for el in self.driver.find_elements(By.CSS_SELECTOR, selector):
+                if el.is_displayed():
+                    return el
+        return None
+
+    def _click_submit_button(self, text_keywords: List[str]) -> bool:
+        """Click the first visible submit/button matching any of the text keywords."""
+        for selector in ['input[type="submit"]', 'button[type="submit"]', '.btn-primary', 'button']:
+            for btn in self.driver.find_elements(By.CSS_SELECTOR, selector):
+                if not btn.is_displayed():
+                    continue
+                txt = (btn.text or '').lower()
+                btype = (btn.get_attribute('type') or '').lower()
+                if btype == 'submit' or any(w in txt for w in text_keywords):
+                    btn.click()
+                    return True
+        return False
+
     # ------------------------------------------------------------------
-    # Authentication
+    # Authentication check
     # ------------------------------------------------------------------
 
     def _check_authentication(self) -> bool:
         try:
-            current_url = self.driver.current_url.lower()
-            page_source = self.driver.page_source.lower()
-
-            # Negative: login page
-            login_indicators = ['login', 'signin', 'sign-in', 'authenticate']
-            for indicator in login_indicators:
-                if indicator in current_url:
-                    return False
-
-            # Check for visible login form
-            password_fields = self.driver.find_elements(By.CSS_SELECTOR, 'input[type="password"]')
-            visible_password = [f for f in password_fields if f.is_displayed()]
-            if visible_password:
+            url = self.driver.current_url.lower()
+            if any(x in url for x in ['login', 'signin', 'sign-in', 'authenticate']):
+                return False
+            if any(f.is_displayed()
+                   for f in self.driver.find_elements(By.CSS_SELECTOR, 'input[type="password"]')):
                 return False
 
-            # Positive: research content
-            auth_indicators = [
-                'my research', 'my ressearch',  # Note: typo in spreadsheet, check both
-                'logout', 'sign out', 'research', 'report',
-                'analyst', 'coverage', 'dashboard'
-            ]
-            for indicator in auth_indicators:
-                if indicator in page_source:
-                    print(f"[{self.PORTAL_NAME}] ✓ Auth check: valid session")
-                    return True
+            page = self.driver.page_source.lower()
+            if any(x in page for x in ['ressearch', 'my research', 'logout', 'sign out', 'research', 'report']):
+                print(f"[{self.PORTAL_NAME}] ✓ Auth check: valid session")
+                return True
 
-            if 'portal.arete.net' in current_url and 'login' not in current_url:
+            if 'portal.arete.net' in url and 'login' not in url:
                 print(f"[{self.PORTAL_NAME}] ✓ Auth check: on portal")
                 return True
 
             return False
-
         except Exception as e:
             print(f"[{self.PORTAL_NAME}] ✗ Auth check error: {e}")
             return False
 
     # ------------------------------------------------------------------
-    # Navigate to My Research (home page)
+    # Navigate to My Ressearch section on home page
     # ------------------------------------------------------------------
 
     def _navigate_to_notifications(self) -> bool:
-        """My Research is on the home page — find and focus that section"""
+        """Navigate to home page and confirm My Ressearch section is visible."""
         try:
-            time.sleep(3)
-
-            # Check if we're already on the home page with My Research visible
-            page_source = self.driver.page_source.lower()
-            if 'my research' in page_source or 'my ressearch' in page_source:
-                print(f"[{self.PORTAL_NAME}] ✓ My Research section visible on home page")
-                return True
-
-            # Try clicking "My Research" link/tab if it exists
-            all_clickable = self.driver.find_elements(
-                By.CSS_SELECTOR, 'a, button, [role="tab"], li, span, div[class*="tab"]')
-            for el in all_clickable:
-                try:
-                    text = (el.text or '').strip().lower()
-                    if 'my research' in text or 'my ressearch' in text:
-                        if el.is_displayed():
-                            self.driver.execute_script("arguments[0].click();", el)
-                            print(f"[{self.PORTAL_NAME}] ✓ Clicked My Research")
-                            time.sleep(3)
-                            return True
-                except:
-                    continue
-
-            # Navigate to home page explicitly
             self.driver.get(self.CONTENT_URL)
-            time.sleep(3)
+            time.sleep(4)
 
-            page_source = self.driver.page_source.lower()
-            if 'research' in page_source or 'report' in page_source:
-                print(f"[{self.PORTAL_NAME}] ✓ On home page with research content")
+            page = self.driver.page_source.lower()
+            if 'ressearch' in page or 'my research' in page or 'your research' in page:
+                print(f"[{self.PORTAL_NAME}] ✓ My Ressearch section visible")
                 return True
 
-            print(f"[{self.PORTAL_NAME}] ✗ Could not find My Research section")
+            # Try scrolling to trigger lazy-load
+            self.driver.execute_script("window.scrollTo(0, 500)")
+            time.sleep(2)
+            page = self.driver.page_source.lower()
+            if 'research' in page or 'report' in page:
+                print(f"[{self.PORTAL_NAME}] ✓ Research content found on home page")
+                return True
+
+            print(f"[{self.PORTAL_NAME}] ✗ My Ressearch section not found")
             return False
 
         except Exception as e:
-            print(f"[{self.PORTAL_NAME}] ✗ Error navigating to My Research: {e}")
+            print(f"[{self.PORTAL_NAME}] ✗ Navigation error: {e}")
             return False
 
     # ------------------------------------------------------------------
-    # Extract research articles
+    # Extract articles + PDF links from My Ressearch section
     # ------------------------------------------------------------------
 
     def _extract_notifications(self) -> List[Dict]:
+        """
+        Find articles in the My Ressearch section on the home page.
+        The article title link and the red Adobe icon both point to the same PDF URL,
+        so we simply collect all <a href="*.pdf"> links with meaningful title text.
+        """
         notifications = []
-        seen_urls = set()
+        seen_titles = set()
 
-        try:
-            for scroll_idx in range(5):
-                time.sleep(2)
-                soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+        # Scroll to load all content
+        for i in range(5):
+            self.driver.execute_script(f"window.scrollTo(0, {i * 800})")
+            time.sleep(1.5)
 
-                # Find article/report links
-                all_links = soup.find_all('a', href=True)
-                for link in all_links:
-                    href = link.get('href', '')
+        soup = BeautifulSoup(self.driver.page_source, 'html.parser')
 
-                    # Filter for research-type links
-                    if not any(x in href.lower() for x in [
-                        '/research/', '/report/', '/article/', '/document/',
-                        '/view/', '/note/', '/insight/'
-                    ]):
-                        # Also accept links that are clearly not navigation
-                        if href.startswith('#') or href == '/' or '/login' in href:
-                            continue
-                        # Check if the link text suggests a report title
-                        title_text = link.get_text(strip=True)
-                        if not title_text or len(title_text) < 10:
-                            continue
-                        # Skip obvious nav links
-                        if title_text.lower() in ['home', 'about', 'contact', 'login', 'logout', 'my research']:
-                            continue
+        # Every article title is a direct .pdf link — collect them all
+        for a in soup.find_all('a', href=lambda h: h and '.pdf' in h.lower()):
+            title = a.get_text(strip=True)
+            if len(title) < 10:
+                continue  # Skip icon-only links (no meaningful text)
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
 
-                    if not href.startswith('http'):
-                        href = 'https://portal.arete.net' + href
+            pdf_url = a.get('href', '')
+            if not pdf_url.startswith('http'):
+                pdf_url = 'https://portal.arete.net' + pdf_url
 
-                    if href in seen_urls:
-                        continue
-                    seen_urls.add(href)
+            parent = a.find_parent('tr') or a.find_parent(['li', 'article', 'div'])
+            pub_date = self._extract_date(parent)
+            analyst = self._extract_analyst_name(parent)
 
-                    title = link.get_text(strip=True)
-                    if not title or len(title) < 5:
-                        title = link.get('title', 'Untitled')
-                    if not title or len(title) < 5:
-                        continue
+            notifications.append({
+                'title': title[:200],
+                'url': self.CONTENT_URL,   # Don't navigate away from home in base pipeline
+                'pdf_link': pdf_url,       # Used directly in _extract_report_content
+                'analyst': analyst,
+                'source': 'Arete',
+                'date': pub_date.strftime('%Y-%m-%d') if pub_date else None,
+            })
 
-                    parent = link.find_parent(['div', 'li', 'article', 'tr', 'section'])
-                    analyst = self._extract_analyst_name(parent)
-                    pub_date = self._extract_date(parent)
-
-                    notifications.append({
-                        'title': title[:200],
-                        'url': href,
-                        'analyst': analyst,
-                        'source': 'Arete',
-                        'date': pub_date.strftime('%Y-%m-%d') if pub_date else None,
-                    })
-
-                # Scroll for more
-                self.driver.execute_script("window.scrollBy(0, 600)")
-
-            print(f"[{self.PORTAL_NAME}] ✓ Found {len(notifications)} articles")
-            return notifications
-
-        except Exception as e:
-            print(f"[{self.PORTAL_NAME}] ✗ Error extracting articles: {e}")
-            return []
+        print(f"[{self.PORTAL_NAME}] ✓ Found {len(notifications)} articles")
+        return notifications
 
     def _extract_analyst_name(self, element) -> Optional[str]:
         if not element:
             return None
+        # Table row: cells[1] = "FirstName LastName" (two hidden sub-cells joined with space)
+        if element.name == 'tr':
+            cells = element.find_all('td')
+            if len(cells) >= 2:
+                parts = cells[1].get_text(separator=' ', strip=True).split()
+                name = ' '.join(p for p in parts if p)
+                if 3 <= len(name) <= 50:
+                    return name
+        # Fallback: person name pattern in element text
         text = element.get_text()
-        patterns = [
-            r'by\s+([A-Z][a-z]+\s+[A-Z][a-z]+)',
-            r'([A-Z][a-z]+\s+[A-Z][a-z]+)\s*[-–]',
-            r'Author:\s*([A-Z][a-z]+\s+[A-Z][a-z]+)',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                return match.group(1)
-        return None
+        match = re.search(r'([A-Z][a-z]+\s+[A-Z][a-z]+)', text)
+        return match.group(1) if match else None
 
     def _extract_date(self, element) -> Optional[datetime]:
         if not element:
             return None
+        # Table row: cells[2] = "ISO_TIMESTAMP|DD Mon YY" — prefer ISO (most reliable)
+        if element.name == 'tr':
+            cells = element.find_all('td')
+            if len(cells) >= 3:
+                date_text = cells[2].get_text(separator='|', strip=True)
+                iso_match = re.search(r'(\d{4}-\d{2}-\d{2})T', date_text)
+                if iso_match:
+                    try:
+                        return dateparser.parse(iso_match.group(1))
+                    except Exception:
+                        pass
+                # Fallback: parse the display portion
+                try:
+                    return dateparser.parse(date_text.split('|')[0])
+                except Exception:
+                    pass
+        # Last resort: scan text for date patterns
         text = element.get_text()
-        date_patterns = [
-            r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4})',
-            r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})',
-            r'(\d{1,2}/\d{1,2}/\d{4})',
+        for pattern in [
             r'(\d{4}-\d{2}-\d{2})',
-        ]
-        for pattern in date_patterns:
+            r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4})',
+        ]:
             match = re.search(pattern, text, re.I)
             if match:
                 try:
                     return dateparser.parse(match.group(1))
-                except:
+                except Exception:
                     pass
         return None
 
@@ -401,98 +312,92 @@ class AreteScraper(BaseScraper):
     # ------------------------------------------------------------------
 
     def _navigate_to_report(self, report_url: str) -> bool:
-        try:
-            self.driver.get(report_url)
-            time.sleep(5)
-            return True
-        except Exception as e:
-            print(f"    ✗ Error navigating to report: {e}")
-            return False
+        """No navigation needed — PDF URL is stored in report['pdf_link']."""
+        return True
 
     def _extract_report_content(self, report: Dict = None) -> Optional[str]:
-        # Try page text first (Arete may render content inline)
-        text = self._extract_text_from_page()
-        if text and len(text) > 500:
-            print(f"    ✓ Extracted {len(text)} chars from page")
-            return text
+        """Download PDF using the direct URL stored in report['pdf_link']."""
+        pdf_url = report.get('pdf_link') if report else None
 
-        # Try PDF
-        pdf_url = self._get_pdf_url()
-        if pdf_url:
-            self._sync_cookies_from_driver()
-            pdf_bytes = self.download_pdf(pdf_url)
-            if pdf_bytes:
-                if report:
-                    pdf_path = self._save_pdf(pdf_bytes, report)
-                    if pdf_path:
-                        report['pdf_path'] = pdf_path
-                text = self.extract_text_from_pdf(pdf_bytes)
-                if text:
-                    return text
+        if not pdf_url:
+            print(f"    ✗ No PDF found for: {(report or {}).get('title', '')[:50]}")
+            return None
+
+        print(f"    Downloading PDF: {pdf_url[:80]}")
+
+        pdf_bytes = self._download_pdf_via_browser(pdf_url)
+        if not pdf_bytes:
+            return None
+
+        if report:
+            pdf_path = self._save_pdf(pdf_bytes, report)
+            if pdf_path:
+                report['pdf_path'] = pdf_path
+
+        return self.extract_text_from_pdf(pdf_bytes) or None
+
+    def _download_pdf_via_browser(self, pdf_url: str) -> Optional[bytes]:
+        """
+        Navigate to the portal PDF link → follow redirect through research.arete.net
+        → land on CloudFront viewer → extract pre-signed S3 URL from viewer URL params
+        → download directly from S3 (no auth needed for pre-signed URLs).
+        """
+        import requests as _requests
+        from urllib.parse import urlparse, parse_qs, unquote
+
+        # Navigate to portal PDF link — will redirect through research.arete.net
+        # to the CloudFront viewer at d321bl9io865gk.cloudfront.net/view?s3Url=...
+        try:
+            self.driver.get(pdf_url)
+            time.sleep(4)
+        except Exception:
+            time.sleep(2)
+
+        current_url = self.driver.current_url
+        print(f"    Redirected to: {current_url[:100]}")
+
+        try:
+            parsed = urlparse(current_url)
+            params = parse_qs(parsed.query)
+
+            # Primary: pre-signed S3 URL (no auth required)
+            s3_encoded = params.get('s3Url', [None])[0]
+            if s3_encoded:
+                s3_url = unquote(s3_encoded)
+                print(f"    Fetching from S3: {s3_url[:80]}")
+                resp = _requests.get(s3_url, timeout=30)
+                if resp.status_code == 200 and len(resp.content) > 1000:
+                    print(f"    Downloaded {len(resp.content)} bytes from S3")
+                    self.driver.get(self.CONTENT_URL)
+                    time.sleep(2)
+                    return resp.content
+                print(f"    ✗ S3 fetch failed: HTTP {resp.status_code}")
+
+            # Fallback: watermarked src URL (auth token embedded in URL params)
+            src_encoded = params.get('src', [None])[0]
+            if src_encoded:
+                src_url = unquote(src_encoded)
+                print(f"    Trying watermarked src: {src_url[:80]}")
+                resp = _requests.get(src_url, timeout=30)
+                if resp.status_code == 200 and len(resp.content) > 1000:
+                    print(f"    Downloaded {len(resp.content)} bytes (watermarked)")
+                    self.driver.get(self.CONTENT_URL)
+                    time.sleep(2)
+                    return resp.content
+                print(f"    ✗ Watermarked src failed: HTTP {resp.status_code}")
+
+        except Exception as e:
+            print(f"    ✗ Download error: {e}")
+
+        # Navigate back so _is_session_valid() sees the portal home next iteration
+        try:
+            self.driver.get(self.CONTENT_URL)
+            time.sleep(2)
+        except Exception:
+            pass
 
         return None
 
-    def _get_pdf_url(self) -> Optional[str]:
-        try:
-            pdf_selectors = [
-                'a[href*=".pdf"]',
-                '[aria-label*="PDF"]',
-                '[title*="PDF"]',
-                'a[class*="pdf"]',
-                'a[class*="download"]',
-            ]
-
-            for selector in pdf_selectors:
-                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for el in elements:
-                    if el.is_displayed():
-                        href = el.get_attribute('href')
-                        if href and '.pdf' in href.lower():
-                            print(f"    ✓ Found PDF link: {href[:60]}...")
-                            return href
-                        self.driver.execute_script("arguments[0].click();", el)
-                        time.sleep(2)
-
-            # Search page source
-            pdf_urls = re.findall(
-                r'(https?://[^\s"\']*\.pdf[^\s"\']*)', self.driver.page_source)
-            if pdf_urls:
-                print(f"    ✓ Found PDF URL in source: {pdf_urls[0][:60]}...")
-                return pdf_urls[0]
-
-            return None
-        except Exception as e:
-            print(f"    ⚠ Error getting PDF URL: {e}")
-            return None
-
-    def _extract_text_from_page(self) -> Optional[str]:
-        try:
-            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-            for element in soup(['script', 'style', 'nav', 'header', 'footer']):
-                element.decompose()
-
-            content_selectors = [
-                '.report-content', '.article-content', '.document-content',
-                '.research-content', '.note-content', '.insight-content',
-                'article', 'main', '[role="main"]',
-            ]
-            for selector in content_selectors:
-                content = soup.select_one(selector)
-                if content:
-                    text = content.get_text(separator='\n', strip=True)
-                    if len(text) > 500:
-                        return text
-
-            body = soup.find('body')
-            if body:
-                lines = [l for l in body.get_text(separator='\n', strip=True).split('\n') if len(l) > 50]
-                if lines:
-                    return '\n'.join(lines)
-
-            return None
-        except Exception as e:
-            print(f"    ⚠ Error extracting page text: {e}")
-            return None
 
 
 # ------------------------------------------------------------------
@@ -514,14 +419,14 @@ if __name__ == "__main__":
 
     print(f"✓ Found credentials for: {username}")
 
-    print("\n[1/2] Initializing scraper...")
+    print("\n[1/2] Initializing scraper (headless=False for debugging)...")
     scraper = AreteScraper(headless=False)
 
     print("\n[2/2] Testing full pipeline...")
-    result = scraper.get_followed_reports(max_reports=10, days=7)
+    result = scraper.get_followed_reports(max_reports=10, days=2)
 
     if result.get('auth_required'):
-        print("\n⚠ Authentication required - check credentials")
+        print("\n⚠ Authentication required — check credentials")
         sys.exit(1)
 
     reports = result.get('reports', [])
@@ -533,9 +438,11 @@ if __name__ == "__main__":
 
     for i, report in enumerate(reports[:3], 1):
         print(f"\n  Report {i}:")
-        print(f"    Title: {report['title'][:60]}")
+        print(f"    Title:   {report['title'][:70]}")
         print(f"    Analyst: {report.get('analyst', 'unknown')}")
-        print(f"    Date: {report.get('date', 'unknown')}")
+        print(f"    Date:    {report.get('date', 'unknown')}")
+        print(f"    PDF:     {report.get('pdf_path', 'not saved')}")
+        print(f"    Content: {len(report.get('content', ''))} chars")
 
     if failures:
         print(f"\n--- Failures ---")

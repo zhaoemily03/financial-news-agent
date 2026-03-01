@@ -32,6 +32,9 @@ TRUSTED_ANALYSTS = {
 }
 
 # Investment Themes/Theses Being Tracked
+# These themes + keywords drive what gets classified as relevant in the pipeline.
+# Users can view and override these via Settings (up to 5 themes).
+# Keywords are injected into the classifier system prompt to bias relevance decisions.
 INVESTMENT_THEMES = [
     {
         'name': 'Digital Transformation',
@@ -73,8 +76,8 @@ EMAIL_CONFIG = {
     'recipients': ['analyst@example.com'],
     'cc': [],
     'subject_prefix': '[Daily Briefing]',
-    'send_time': '07:00',  # 24-hour format
-    'timezone': 'America/New_York'
+    'send_time': '67:00',  # 24-hour format
+    'timezone': 'HK/Beijing'
 }
 
 # Content Source Configuration
@@ -82,7 +85,7 @@ EMAIL_CONFIG = {
 SOURCES = {
     # Sell-side research portals (use PortalRegistry)
     'jefferies': {
-        'enabled': False,  # Temporarily disabled — 0 notifications + hangs pipeline
+        'enabled': True,
         'portal_url': 'https://content.jefferies.com',
         'login_required': True,
         'uses_followed_notifications': True,
@@ -123,7 +126,7 @@ SOURCES = {
         'scraper_class': 'AreteScraper',
     },
     'ubs': {
-        'enabled': False,  # Not yet tested
+        'enabled': True,
         'portal_url': 'https://neo.ubs.com/home',
         'login_required': True,
         'uses_followed_notifications': False,  # Uses per-ticker search
@@ -200,8 +203,37 @@ SOURCES = {
     }
 }
 
+# ------------------------------------------------------------------
+# LLM Model Configuration
+# ------------------------------------------------------------------
+# Task-type to provider+model routing.
+# Override via env vars (no code change needed to switch providers):
+#   LLM_{TASK_TYPE}_PROVIDER   e.g. LLM_SYNTHESIS_PROVIDER=anthropic
+#   LLM_{TASK_TYPE}_MODEL      e.g. LLM_SYNTHESIS_MODEL=claude-opus-4-6
+#   LLM_{TASK_TYPE}_API_KEY    e.g. LLM_SYNTHESIS_API_KEY=sk-ant-...
+#   LLM_{TASK_TYPE}_BASE_URL   e.g. LLM_CLASSIFICATION_BASE_URL=http://localhost:11434/v1
+#
+# Supported providers: openai, openai_compatible, anthropic
+# openai_compatible covers DeepSeek, Qwen, Ollama, LM Studio, etc.
+
+LLM_MODELS = {
+    'classification': {
+        'provider': 'openai',
+        'model': 'gpt-3.5-turbo',   # cheap — high volume (1 call per chunk)
+    },
+    'extraction': {
+        'provider': 'openai',
+        'model': 'gpt-3.5-turbo',   # cheap — high volume (1 call per chunk)
+    },
+    'synthesis': {
+        'provider': 'openai',
+        'model': 'gpt-4.1',          # expensive — few calls, high quality needed
+    },
+}
+
 # Filtering Configuration
-RELEVANCE_THRESHOLD = 0.7  # 0-1 score for content relevance
+# Note: RELEVANCE_THRESHOLD is defined (and used) in analyst_config_tmt.py.
+# This value is kept as documentation only; do not use config.RELEVANCE_THRESHOLD in pipeline code.
 MIN_CONTENT_LENGTH = 100  # Minimum words to process
 
 # Priority tiers for tickers (affects Tier 1 filtering)
@@ -254,8 +286,9 @@ CONNECTION_SYNTHESIS = {
 
 DRIFT_DETECTION = {
     'enabled': True,
-    'lookback_days': 30,            # How far back to compare
-    'min_claims_for_drift': 2,      # Minimum claims on same topic to detect drift
-    'confidence_shift_threshold': 1, # Levels of confidence change to flag (low→high = 2)
-    'track_by': ['ticker', 'author', 'source'],  # Dimensions to track
+    'analysis_windows': [7, 30, 90],  # Windows compared simultaneously (days)
+    'min_claims_for_drift': 2,        # Minimum claims on same topic to detect drift
+    'confidence_shift_threshold': 1,  # Levels of confidence change to flag (low→high = 2)
+    'max_retention_days': 180,        # Keep 2 earnings cycles; cheap to store, can't look back further than stored
+    'track_by': ['ticker', 'author', 'source'],
 }

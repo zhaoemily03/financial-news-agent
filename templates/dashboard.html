@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}{{ briefing_date }} — Daily Briefing{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+
+  <div class="briefing-nav">
+    <a href="{{ url_for('views.dashboard_date', target_date=prev_date) }}">&larr; {{ prev_date }}</a>
+    <h2 class="briefing-date">
+      {{ briefing_date }}
+      {% if briefing_date == today %}<span class="badge-today">Today</span>{% endif %}
+    </h2>
+    {% if next_date %}
+    <a href="{{ url_for('views.dashboard_date', target_date=next_date) }}">{{ next_date }} &rarr;</a>
+    {% else %}
+    <span class="nav-placeholder"></span>
+    {% endif %}
+  </div>
+
+  {% if morning %}
+    {% if morning.get('from_file') %}
+    <div class="briefing-meta muted">Loaded from file &mdash; pipeline not yet wired to web DB</div>
+    {% endif %}
+    <article class="briefing morning-briefing">
+      {{ morning.html | safe }}
+    </article>
+  {% endif %}
+
+  {% if midday %}
+  <section class="midday-section">
+    <h3 class="midday-header">&#9679; Midday Update</h3>
+    <article class="briefing">
+      {{ midday.html | safe }}
+    </article>
+  </section>
+  {% endif %}
+
+  {% if not morning and not midday %}
+  <div class="empty-state">
+    <p>No briefing available for {{ briefing_date }}.</p>
+    {% if briefing_date == today %}
+    <p class="muted">The pipeline runs automatically at 6:00 AM ET. You can also run it manually:</p>
+    <pre>python run_pipeline.py</pre>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- Drilldown panel — populated via htmx in Phase 5 -->
+  <div id="drilldown-panel"></div>
+
+</div>
+{% endblock %}

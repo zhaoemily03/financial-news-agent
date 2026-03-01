@@ -26,7 +26,6 @@ from briefing_renderer import render_briefing, count_words, count_pages
 from claim_tracker import ClaimTracker
 from drift_detector import detect_drift
 from config import ALL_TICKERS, MACRO_NEWS, SOURCES, DRIFT_DETECTION
-from openai import OpenAI
 
 # Reuse pre-filter helpers from run_pipeline
 from run_pipeline import (
@@ -39,7 +38,6 @@ print("  RE-RENDER: Substack + Podcasts + Macro → merge with today's sellside"
 print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print("=" * 60)
 
-client = OpenAI()
 stats = PipelineStats()
 
 # ------------------------------------------------------------------
@@ -153,7 +151,7 @@ classified = []
 total_kept = 0
 for doc, chunks in chunked:
     print(f"  Classifying {len(chunks)} chunks from: {doc.title[:45]}...")
-    clfs = classify_chunks(chunks, doc, client)
+    clfs = classify_chunks(chunks, doc)
     kept_chunks, kept_clfs, dropped = filter_irrelevant(chunks, clfs)
     total_kept += len(kept_chunks)
     if dropped:
@@ -167,7 +165,7 @@ print(f"  ✓ {total_chunks} chunks → {total_kept} relevant")
 new_claims = []
 for doc, chunks, clfs in classified:
     print(f"  Extracting claims from: {doc.title[:45]}...")
-    doc_claims = extract_claims(chunks, clfs, doc, client)
+    doc_claims = extract_claims(chunks, clfs, doc)
     new_claims.extend(doc_claims)
 
 print(f"  ✓ Extracted {len(new_claims)} new claims from Substack/podcasts/macro")
@@ -209,7 +207,7 @@ if DRIFT_DETECTION.get('enabled', False):
         print(f"  Drift signals: {len(drift_report.signals) if drift_report else 0}")
 
 # Section 2 synthesis
-section2 = synthesize_section2(capped, client=client)
+section2 = synthesize_section2(capped)
 print(f"  Agreements: {len(section2.agreements)}, Disagreements: {len(section2.disagreements)}")
 
 # Render
