@@ -25,7 +25,6 @@ import json
 import os
 from typing import List, Optional, Literal
 from dataclasses import dataclass, field, asdict
-from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -33,6 +32,7 @@ load_dotenv()
 from schemas import Chunk, Document, Claim
 from classifier import ChunkClassification
 import config
+from llm_client import llm_complete, is_configured
 
 # ------------------------------------------------------------------
 # Enums for judgment hooks
@@ -47,6 +47,24 @@ BELIEF_PRESSURES = [
     'unclear',
 ]
 EVENT_TYPES = ['earnings', 'guidance', 'product', 'regulation', 'org', 'market', 'macro']
+
+# PDF disclaimer / appendix sections that are not investment claims
+BOILERPLATE_PATTERNS = [
+    'Rating and Price Target History',
+    'Valuation Methodology',
+    'Important Disclosures',
+    'Analyst Certification',
+    'Required Disclosures',
+    'Regulation AC',
+    'FINRA BrokerCheck',
+    'Company-Specific Disclosures',
+]
+
+def _is_boilerplate(bullets: List[str]) -> bool:
+    """True if extracted bullets look like PDF disclaimer / appendix boilerplate."""
+    text = ' '.join(bullets)
+    return any(p.lower() in text.lower() for p in BOILERPLATE_PATTERNS)
+
 
 # ------------------------------------------------------------------
 # Claim Output Schema
@@ -205,6 +223,62 @@ RULES:
 - Do NOT add narrative or connecting language
 - Do NOT strengthen or weaken the original assertion"""
 
+BOILERPLATE_RETRY_SYSTEM = (
+    SYSTEM_PROMPT
+    + "\n\nNOTE: The previous extraction returned boilerplate (disclaimers, rating history tables, "
+    "valuation methodology text, analyst certifications). If the chunk contains ONLY boilerplate "
+    "with no actionable investment claim, return an empty bullets array: {\"bullets\": []}. "
+    "Extract ONLY if there is a concrete, challengeable investment assertion buried in the text."
+)
+
+# Substack newsletters are independent analyst opinion pieces — shorter, more opinionated,
+# and often contrarian relative to sell-side. Each chunk is a single paragraph;
+# extract up to 5 bullets to surface the full range of claims per paragraph.
+SUBSTACK_SYSTEM_PROMPT = """You are extracting investment-relevant claims from an independent analyst newsletter (Substack).
+Unlike sell-side research, this is an independent perspective that may be contrarian, opinion-driven, or thesis-challenging.
+Your task: Convert the paragraph into up to 5 challengeable bullet points with judgment annotations.
+
+CRITICAL: You are DESCRIBING claims, not DECIDING importance. The reader will form their own conviction.
+Extract ALL distinct investment-relevant assertions in the paragraph — do not merge them into one bullet.
+
+Output format (JSON):
+{
+  "bullets": ["First explicit assertion...", "Second...", "Third...", "Fourth...", "Fifth (optional)..."],
+  "primary_ticker": "META" or null,
+  "has_uncertainty": true/false,
+  "confidence_level": "low" | "medium" | "high",
+  "time_sensitivity": "breaking" | "upcoming" | "ongoing",
+  "belief_pressure": "confirms_consensus" | "contradicts_consensus" | "contradicts_prior_assumptions" | "unclear",
+  "event_type": "earnings" | "guidance" | "product" | "regulation" | "org" | "market" | "macro" | null,
+  "is_descriptive_event": true | false,
+  "has_belief_delta": true | false,
+  "sector_implication": "One sentence TMT linkage" | null
+}
+
+FIELD DEFINITIONS: same as standard extraction.
+
+1. bullets (1-5)
+   - Extract EACH distinct claim as a separate bullet — do not consolidate
+   - Must be EXPLICIT ASSERTIONS that can be verified or challenged
+   - Good: "Groq's inference speed is 10x faster than GPU alternatives at equivalent cost"
+   - Bad: "AI is changing things" (too vague)
+   - PRESERVE the author's uncertainty language: "may", "could", "argues", "believes"
+   - Include named companies, technologies, data points when present
+   - Independent analysts often make bold claims — preserve the directness, do not soften
+
+2. confidence_level (how confident is the AUTHOR, not you)
+   - "high": Author states with conviction, no hedging
+   - "medium": Author hedges somewhat
+   - "low": Author explicitly uncertain
+
+3-8: Same definitions as standard extraction.
+
+RULES:
+- Do NOT rank importance
+- Do NOT add narrative
+- Do NOT soften or strengthen the original assertion
+- If the paragraph contains no investment-relevant claim (pure personal anecdote, metadata, footer), return empty bullets: {"bullets": []}"""
+
 
 def _build_user_prompt(
     chunk: Chunk,
@@ -272,35 +346,33 @@ def extract_claim(
     chunk: Chunk,
     classification: ChunkClassification,
     doc: Document,
-    client: Optional[OpenAI] = None,
-) -> ClaimOutput:
+) -> Optional['ClaimOutput']:
     """
     Extract atomic claim(s) with judgment hooks from a single chunk.
 
-    Args:
-        chunk: Source chunk
-        classification: Chunk classification
-        doc: Parent document (for citation)
-        client: Optional OpenAI client
+    Substack chunks use a higher bullet cap (5) and a prompt tuned for
+    independent analyst opinion pieces. Sell-side chunks use the standard
+    1-2 bullet prompt.
 
-    Returns:
-        ClaimOutput with bullets + judgment annotations
+    Returns None if the chunk is PDF boilerplate (disclaimers, rating history, etc.)
+    after one retry attempt. Caller should skip None results and flag the source doc.
     """
-    if client is None:
-        client = OpenAI()
+    is_substack = doc.source == 'substack'
+    system = SUBSTACK_SYSTEM_PROMPT if is_substack else SYSTEM_PROMPT
+    bullet_cap = 5 if is_substack else 2
+    max_tok = 600 if is_substack else 400
 
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_prompt(chunk, classification, doc)},
+    user_prompt = _build_user_prompt(chunk, classification, doc)
+    raw = llm_complete(
+        "extraction",
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_prompt},
         ],
         temperature=0,
-        max_tokens=400,
-        response_format={"type": "json_object"},
+        max_tokens=max_tok,
+        json_mode=True,
     )
-
-    raw = response.choices[0].message.content
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -310,7 +382,30 @@ def extract_claim(
     bullets = data.get("bullets", [])
     if not bullets or not isinstance(bullets, list):
         bullets = [chunk.text.strip()[:200] + "..."]
-    bullets = bullets[:2]
+    bullets = bullets[:bullet_cap]
+
+    # Boilerplate detection: retry once with explicit skip instruction
+    if _is_boilerplate(bullets):
+        raw2 = llm_complete(
+            "extraction",
+            [
+                {"role": "system", "content": BOILERPLATE_RETRY_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0,
+            max_tokens=400,
+            json_mode=True,
+        )
+        try:
+            data2 = json.loads(raw2)
+        except json.JSONDecodeError:
+            data2 = {}
+        bullets2 = data2.get("bullets", [])
+        if not bullets2 or _is_boilerplate(bullets2):
+            return None  # confirmed boilerplate — skip
+        # Retry succeeded: use retry data
+        data = data2
+        bullets = [b for b in bullets2[:2] if b]
 
     # Validate enums with defaults
     confidence = data.get("confidence_level", "medium")
@@ -383,7 +478,7 @@ def extract_claims(
     chunks: List[Chunk],
     classifications: List[ChunkClassification],
     doc: Document,
-    client: Optional[OpenAI] = None,
+    out_warnings: Optional[List[str]] = None,
 ) -> List[ClaimOutput]:
     """
     Extract claims with judgment hooks from multiple chunks.
@@ -392,19 +487,26 @@ def extract_claims(
         chunks: List of chunks (post-classification, irrelevant already filtered)
         classifications: Corresponding classifications
         doc: Parent document
-        client: Optional OpenAI client (reused)
+        out_warnings: Optional list to append boilerplate-skip notices into
 
     Returns:
-        List of ClaimOutput objects
+        List of ClaimOutput objects (boilerplate chunks excluded)
     """
-    if client is None:
-        client = OpenAI()
-
     results = []
+    boilerplate_count = 0
     for i, (chunk, clf) in enumerate(zip(chunks, classifications)):
         print(f"  Extracting claims {i+1}/{len(chunks)}...", end='\r')
-        claim = extract_claim(chunk, clf, doc, client)
-        results.append(claim)
+        claim = extract_claim(chunk, clf, doc)
+        if claim is not None:
+            results.append(claim)
+        else:
+            boilerplate_count += 1
+
+    if boilerplate_count > 0:
+        msg = f"{doc.title[:60]}: {boilerplate_count} chunk(s) skipped (boilerplate)"
+        print(f"  ⚠ {msg}")
+        if out_warnings is not None:
+            out_warnings.append(msg)
 
     print(f"  Extracted {len(results)} claims" + " " * 20)
     return results
@@ -643,7 +745,7 @@ remains above target. Markets now expect the first cut in September.""",
     ]
 
     # Check for API key
-    if os.getenv("OPENAI_API_KEY"):
+    if is_configured("extraction"):
         print("\nRunning live claim extraction...\n")
 
         claims = extract_claims(sample_chunks, sample_classifications, sample_doc)

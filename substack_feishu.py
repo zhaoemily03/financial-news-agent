@@ -70,8 +70,11 @@ class _HTMLTextExtractor(HTMLParser):
 
     def get_text(self) -> str:
         raw = ''.join(self.parts)
-        # Collapse invisible spacing chars Substack injects
-        raw = re.sub(r'[\u034f\u00ad\u200b\u200c\u200d\ufeff]+', '', raw)
+        # Collapse invisible spacing chars Substack injects (tracking pixels, preview spacers)
+        # Includes non-breaking space (\xa0) and figure space (\u2007) which str.strip() misses
+        raw = re.sub(r'[\u034f\u00ad\u200b\u200c\u200d\ufeff\xa0\u2007\u200a\u205f]+', ' ', raw)
+        # Collapse runs of whitespace within lines to a single space
+        raw = re.sub(r'[ \t]{2,}', ' ', raw)
         # Collapse multiple blank lines
         raw = re.sub(r'\n{3,}', '\n\n', raw)
         return raw.strip()
@@ -243,8 +246,8 @@ def _extract_substack_url(html: str) -> str:
 
 
 ARTICLE_FETCH_TIMEOUT = 5          # seconds per URL request
-ARTICLE_FETCH_MAX_CHARS = 1500     # chars of body text to keep (enough for classifier)
-ARTICLE_FETCH_MIN_BODY = 500       # only fetch URL if email body is shorter than this
+ARTICLE_FETCH_MAX_CHARS = 8000     # chars to keep from URL fallback (full article)
+ARTICLE_FETCH_MIN_BODY = 500       # fetch URL only if email body is shorter than this
 
 
 def _fetch_article_body(url: str) -> str:
@@ -293,38 +296,71 @@ def _is_substack_email(subject: str, body_text: str) -> bool:
 
 
 def _extract_article_content(body_text: str) -> str:
-    """Extract the article content, stripping forwarded headers and footers."""
+    """Extract the article content, stripping forwarded headers and footers.
+
+    Substack email structure (forwarded):
+      1. Chinese/English forwarding headers (发件人, 已发送, etc.)
+      2. Article teaser/subtitle
+      3. Invisible tracking spacers
+      4. Top-of-email nav banner: "Forwarded this email?", "Subscribe here for more"
+      5. Article title, subtitle (repeated), author, date
+      6. "READ IN APP" nav link
+      7. *** Actual article body paragraphs ***
+      8. Footer: "Unsubscribe", "© 20...", etc.
+
+    Nav elements in section 4 and 6 are SKIPPED (article follows).
+    Footer elements in section 8 trigger STOP (only after capturing ≥300 chars
+    of content, preventing a false match on a footer-like word in the body).
+    """
+    # Top-of-email nav elements — skip the line, article content follows
+    NAV_SKIP = [
+        'Forwarded this email?',
+        'Subscribe here for more',
+        'READ IN APP',
+    ]
+    # True footer markers — stop once we have enough content
+    FOOTER_STOP = [
+        'Unsubscribe',
+        '© 20',
+        'You received this email',
+        'Get the app',
+    ]
+
     lines = body_text.split('\n')
     content_lines = []
+    content_chars = 0
     in_content = False
     skip_header = True
 
     for line in lines:
         stripped = line.strip()
 
-        # Skip forwarded email header block
+        # Skip forwarded email header block (Chinese and English variants)
         if skip_header:
             if any(stripped.startswith(p) for p in ['发件人:', 'From:', '已发送:', 'Sent:',
                                                      '收件人:', 'To:', '主题:', 'Subject:']):
                 continue
-            if stripped == '' and not in_content:
+            if not stripped:
                 continue
             skip_header = False
             in_content = True
 
-        # Stop at Substack footer
-        if any(marker in stripped for marker in [
-            'Forwarded this email?',
-            'Subscribe here for more',
-            'Unsubscribe',
-            '© 20',
-            'You received this email',
-            'Get the app',
-        ]):
+        # Skip top-nav banners — don't stop, article body comes after
+        if any(marker in stripped for marker in NAV_SKIP):
+            continue
+
+        # Stop at true footer — but only after capturing meaningful content
+        # (guards against footer-like words appearing in article body early on)
+        if content_chars >= 300 and any(marker in stripped for marker in FOOTER_STOP):
             break
 
         if in_content:
-            content_lines.append(line)
+            if stripped:
+                content_lines.append(line)
+                content_chars += len(stripped)
+            elif content_chars > 0 and (not content_lines or content_lines[-1] != ''):
+                # Preserve one blank line as paragraph separator (needed for chunker's \n{2,} split)
+                content_lines.append('')
 
     return '\n'.join(content_lines).strip()
 

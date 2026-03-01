@@ -6,10 +6,10 @@ Target: 150–400 tokens per chunk. No interpretation. Lossless.
 Pipeline: Normalize (per-page) → chunk_document() → atomic Chunks
 
 Usage:
-    from jefferies_normalizer import JefferiesNormalizer
+    from normalizer import DocumentNormalizer
     from chunker import chunk_document
 
-    normalizer = JefferiesNormalizer()
+    normalizer = DocumentNormalizer()
     doc, page_chunks = normalizer.normalize(pdf_bytes, meta)
     atomic_chunks = chunk_document(doc, page_chunks)
 """
@@ -25,6 +25,10 @@ from schemas import Document, Chunk
 
 MIN_TOKENS = 150
 MAX_TOKENS = 400
+
+# Substack articles are short opinion pieces: each paragraph is a claim unit.
+# Lower floor drops bylines/datelines; no upper cap (paragraphs are naturally bounded).
+SUBSTACK_MIN_TOKENS = 20
 
 
 def estimate_tokens(text: str) -> int:
@@ -216,6 +220,43 @@ def _split_oversized(text: str) -> List[str]:
 
 
 # ------------------------------------------------------------------
+# Substack: paragraph-level chunking
+# ------------------------------------------------------------------
+
+def _chunk_substack(doc: Document, page_chunks: List[Chunk]) -> List[Chunk]:
+    """Paragraph-level chunking for Substack newsletters.
+
+    Substack articles are short opinion pieces where each paragraph is a
+    distinct claim. Splitting at paragraph boundaries (instead of packing
+    to the 150-400 token target) gives the classifier focused signal per
+    idea and surfaces multiple claims per article.
+
+    Paragraphs under SUBSTACK_MIN_TOKENS are dropped (bylines, datelines,
+    one-line spacers that add no investment signal).
+    """
+    atomic: List[Chunk] = []
+    idx = 0
+
+    for pc in page_chunks:
+        paragraphs = [p.strip() for p in re.split(r'\n{2,}', pc.text) if p.strip()]
+        for para in paragraphs:
+            if estimate_tokens(para) < SUBSTACK_MIN_TOKENS:
+                continue
+            chunk = Chunk(
+                doc_id=doc.doc_id,
+                chunk_index=idx,
+                text=para,
+                page_start=pc.page_start,
+                page_end=pc.page_end,
+                metadata={'segment_type': 'paragraph'},
+            )
+            atomic.append(chunk)
+            idx += 1
+
+    return atomic
+
+
+# ------------------------------------------------------------------
 # Public API
 # ------------------------------------------------------------------
 
@@ -223,13 +264,20 @@ def chunk_document(doc: Document, page_chunks: List[Chunk]) -> List[Chunk]:
     """
     Split page-level chunks into atomic chunks.
 
+    Substack articles use paragraph-level splitting (each paragraph = one chunk)
+    so the classifier gets focused signal per idea. All other sources use the
+    standard 150-400 token packing logic.
+
     Args:
         doc: parent Document
-        page_chunks: page-level Chunks from JefferiesNormalizer
+        page_chunks: page-level Chunks from DocumentNormalizer
 
     Returns:
         List of atomic Chunks with page linkage and segment metadata
     """
+    if doc.source == 'substack':
+        return _chunk_substack(doc, page_chunks)
+
     atomic: List[Chunk] = []
     idx = 0
 
@@ -261,7 +309,7 @@ def chunk_document(doc: Document, page_chunks: List[Chunk]) -> List[Chunk]:
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from jefferies_normalizer import JefferiesNormalizer
+    from normalizer import DocumentNormalizer as JefferiesNormalizer
 
     # Simulated 2-page Jefferies report
     page1_text = """Brent Thill
