@@ -23,6 +23,7 @@ Usage:
 
 import json
 import os
+import re
 from typing import List, Optional, Literal
 from dataclasses import dataclass, field, asdict
 from dotenv import load_dotenv
@@ -58,6 +59,12 @@ BOILERPLATE_PATTERNS = [
     'Regulation AC',
     'FINRA BrokerCheck',
     'Company-Specific Disclosures',
+    # EU/ESMA regulatory disclosures (MiFID II / MAR compliance headers)
+    'Investment Recommendation Record',
+    'Article 3(1)',
+    'Market Abuse Regulation',
+    'Recommendation Published',
+    'Recommendation Distributed',
 ]
 
 def _is_boilerplate(bullets: List[str]) -> bool:
@@ -427,7 +434,14 @@ def extract_claim(
     if raw_ticker and raw_ticker in config.ALL_TICKERS:
         ticker = raw_ticker
     elif not raw_ticker and classification.tickers:
-        ticker = classification.tickers[0]  # fall back only when LLM found no primary ticker
+        # Cross-check: if the bullet explicitly names a parenthetical ticker that
+        # doesn't match the classifier's candidate, this is an off-coverage company
+        # (e.g. MiniMax (0100.HK) in a META-classified chunk → don't assign to META).
+        candidate = classification.tickers[0]
+        bullet_text = (data.get("bullets") or [""])[0]
+        inline_tickers = re.findall(r'\(([A-Z0-9][A-Z0-9.]{1,6}(?:\.HK|\.SS|\.SZ)?)\)', bullet_text)
+        off_coverage = [t for t in inline_tickers if t not in config.ALL_TICKERS and t != candidate]
+        ticker = None if off_coverage else candidate
     else:
         ticker = None  # off-coverage company — don't misattribute to a tracked ticker
 

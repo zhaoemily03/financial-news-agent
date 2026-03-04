@@ -4,7 +4,10 @@
       "Bash(brew:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(git config:*)",
+      "Bash(cat /Users/emilyzhao/financial-news-agent/data/alerts/*.txt)",
+      "Bash(python3 run_pipeline.py)"
     ]
   }
 }

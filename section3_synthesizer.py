@@ -49,24 +49,29 @@ class Section3Synthesis:
 # Macro Relevance Filter
 # ------------------------------------------------------------------
 
-MACRO_FILTER_SYSTEM_PROMPT = """You are a TMT portfolio analyst deciding which macro events have genuine potential to disrupt the financial return assumptions of this portfolio.
+MACRO_FILTER_SYSTEM_PROMPT = """You are a TMT portfolio analyst at a secondaries hedge fund, deciding which macro events have genuine potential to shift return assumptions or near-term positioning for this portfolio.
+
+The organizing lens: US-China competition for technological and economic hegemony, and its downstream effects on global supply chains, capital flows, and market sentiment.
 
 PORTFOLIO:
 - Internet: META, GOOGL, AMZN, AAPL, BABA, 700.HK
 - Software/Security: MSFT, CRWD, ZS, PANW, NET, DDOG, SNOW, MDB
 
 INCLUDE a claim if it could materially affect:
-- Ad spend, cloud budgets, or enterprise software procurement
-- Regulatory or geopolitical risk with named tech sector exposure
-- Monetary/fiscal policy shifts that compress or expand growth software multiples
-- AI ecosystem access, model cost, or regulatory constraints
-- Hardware/supply chain access for portfolio names
+- Supply chain access, hardware procurement, or manufacturing location for portfolio names
+- Export controls, sanctions, or tariffs with direct technology or semiconductor exposure
+- Geopolitical flashpoints that shift US-China risk perception or capital flows into/out of China tech
+- Energy or commodity prices that affect data center costs or consumer spending on digital
+- Dollar strength that shifts international revenue assumptions for GOOGL, META, AMZN, BABA
+- Regulatory actions that reshape competitive dynamics for specific portfolio tickers
+- AI infrastructure access, compute cost, model ecosystem constraints, or AI governance (including military AI use, government AI contracts, AI company regulatory exposure)
+- Any geopolitical escalation with plausible knock-on effects on semiconductors, cloud, or digital infrastructure — even if tech is not explicitly named
 
 EXCLUDE a claim if it is:
-- General economic commentary with no TMT connection
-- GDP/employment/trade data without portfolio implications
-- Credit/bond dynamics unrelated to tech multiples
-- Industrial or commodity macro with no TMT supply chain link
+- Pure domestic economic data (GDP, jobs, CPI) with no explicit geopolitical or tech connection
+- Equity market price moves or index levels with no causal explanation
+- Credit/bond/rate dynamics that don't directly connect to software multiples or procurement
+- Industrial, healthcare, or commodity news with no TMT supply chain link
 
 Return ONLY a JSON object: {"relevant_indices": [0, 2, ...]} using 0-based indices from the list.
 If nothing qualifies, return {"relevant_indices": []}."""
@@ -101,6 +106,11 @@ def filter_macro_claims_by_tmt_relevance(
 
     try:
         indices = json.loads(response).get("relevant_indices", [])
+        kept = set(indices)
+        for i, c in enumerate(claims):
+            label = "KEEP" if i in kept else "DROP"
+            bullet = c.bullets[0][:80] if c.bullets else "(no bullet)"
+            print(f"    [{label}] [{i}] {bullet}")
         filtered = [claims[i] for i in indices if 0 <= i < len(claims)]
         return filtered if filtered else claims  # fallback: never return empty if input non-empty
     except (json.JSONDecodeError, KeyError, TypeError):
@@ -111,14 +121,15 @@ def filter_macro_claims_by_tmt_relevance(
 # System Prompt
 # ------------------------------------------------------------------
 
-SECTION3_SYSTEM_PROMPT = """You are a TMT portfolio analyst mapping macro signals to portfolio implications.
+SECTION3_SYSTEM_PROMPT = """You are a TMT portfolio analyst at a secondaries hedge fund mapping geopolitical macro signals to portfolio implications.
 
 The macro signals are already listed above your narrative — do NOT repeat or summarize them.
-Your job: write 2-3 sentences connecting these signals to potential to disrupt a TMT-based portfolio at a thematic level.
+Your job: write 2-3 sentences connecting these signals to portfolio risk, viewed through the lens of US-China competition for technological and economic hegemony.
 
-FOCUS ON:
-- Which type of ticker / companies in the portfolio are most exposed to each macro signal
-- potential for destabilizing the TMT portfolio's fundamental assumptions
+CONSIDER where relevant:
+- Which portfolio names are most exposed via China/Asia revenue, hardware supply chains, or semiconductor dependencies
+- How geopolitical escalation or reshoring shifts fundamental cost or revenue assumptions
+- Near-term secondaries positioning implications: does this shift risk appetite or sector rotation pressure
 
 PORTFOLIO REFERENCE:
 Internet: META, GOOGL, AMZN, AAPL, BABA, 700.HK
@@ -129,7 +140,7 @@ RULES:
 - Do NOT use thesis language: no "bullish", "bearish", "buy", "sell", "recommend"
 - Do NOT repeat or paraphrase the headline text above
 - Cite specific tickers where the linkage is clear
-- Under 150 words — this is a bridge sentence, not a summary
+- Under 150 words — this is a bridge paragraph, not a summary
 - This output will be flagged as model-generated; the analyst applies their own judgment"""
 
 

@@ -26,9 +26,6 @@ from schemas import Document, Chunk
 MIN_TOKENS = 150
 MAX_TOKENS = 400
 
-# Substack articles are short opinion pieces: each paragraph is a claim unit.
-# Lower floor drops bylines/datelines; no upper cap (paragraphs are naturally bounded).
-SUBSTACK_MIN_TOKENS = 20
 
 
 def estimate_tokens(text: str) -> int:
@@ -226,26 +223,23 @@ def _split_oversized(text: str) -> List[str]:
 def _chunk_substack(doc: Document, page_chunks: List[Chunk]) -> List[Chunk]:
     """Paragraph-level chunking for Substack newsletters.
 
-    Substack articles are short opinion pieces where each paragraph is a
-    distinct claim. Splitting at paragraph boundaries (instead of packing
-    to the 150-400 token target) gives the classifier focused signal per
-    idea and surfaces multiple claims per article.
-
-    Paragraphs under SUBSTACK_MIN_TOKENS are dropped (bylines, datelines,
-    one-line spacers that add no investment signal).
+    Splits at paragraph boundaries then packs short paragraphs to the standard
+    150-400 token target (same as sell-side). This prevents long-form Substack
+    articles (e.g. SemiAnalysis) from generating 100+ single-paragraph chunks
+    and keeps classifier work balanced across source types.
     """
     atomic: List[Chunk] = []
     idx = 0
 
     for pc in page_chunks:
         paragraphs = [p.strip() for p in re.split(r'\n{2,}', pc.text) if p.strip()]
-        for para in paragraphs:
-            if estimate_tokens(para) < SUBSTACK_MIN_TOKENS:
-                continue
+        segments = [(p, 'paragraph', None) for p in paragraphs]
+        packed = _pack_segments(segments)
+        for text, _, _ in packed:
             chunk = Chunk(
                 doc_id=doc.doc_id,
                 chunk_index=idx,
-                text=para,
+                text=text,
                 page_start=pc.page_start,
                 page_end=pc.page_end,
                 metadata={'segment_type': 'paragraph'},

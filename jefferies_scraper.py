@@ -34,7 +34,7 @@ import pdfplumber
 from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
 
-from analyst_config_tmt import PRIMARY_TICKERS, WATCHLIST_TICKERS
+from analyst_config_tmt import get_primary_tickers, get_watchlist_tickers
 from base_scraper import BaseScraper
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -54,7 +54,7 @@ _JEFFERIES_TICKER_SEARCH_NAMES = {
 }
 
 # All tickers to search — union of primary and watchlist, minus uncovered tickers
-_SEARCH_TICKERS = sorted((PRIMARY_TICKERS | WATCHLIST_TICKERS) - _JEFFERIES_SKIP_TICKERS)
+_SEARCH_TICKERS = sorted((get_primary_tickers() | get_watchlist_tickers()) - _JEFFERIES_SKIP_TICKERS)
 
 # Cookies that poison auth — strip on every load and save
 _JUNK_COOKIE_NAMES = frozenset({'unauthorized-portal-user', 'IFrame-Request'})

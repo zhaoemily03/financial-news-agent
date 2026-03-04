@@ -55,6 +55,63 @@ def _is_high_alert(claim: ClaimOutput) -> bool:
 
 
 # ------------------------------------------------------------------
+# Bullet Quality Filter
+# ------------------------------------------------------------------
+
+import re as _re
+
+_STUB_BULLET_RE = _re.compile(
+    r'^[\w\s.,&\'-]+\([A-Z0-9.]+\)\.\.\.$'   # "Company Name (TICK)..." — company header, no content
+)
+
+_STOP_WORDS = {
+    'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+    'of', 'with', 'by', 'from', 'up', 'is', 'was', 'are', 'be', 'as', 'its',
+    'that', 'this', 'it', 'has', 'had', 'have', 'not', 'also', 'than',
+}
+
+def _content_words(text: str) -> set:
+    """Lowercase, punctuation-stripped token set minus stop words — for Jaccard dedup."""
+    tokens = (w.strip('.,;:()[]"\'/').lower() for w in text.split())
+    return {t for t in tokens if t and t not in _STOP_WORDS}
+
+def _dedup_claims(claims: List[ClaimOutput], threshold: float = 0.50) -> List[ClaimOutput]:
+    """
+    Drop near-duplicate bullets within a ticker group using Jaccard word overlap.
+    Same approach as macro_news.py cross-feed dedup (≥50% overlap = duplicate).
+    Claims are assumed pre-sorted by priority so first occurrence wins.
+    """
+    kept: List[ClaimOutput] = []
+    kept_words: List[set] = []
+    for claim in claims:
+        words = _content_words(claim.bullets[0])
+        is_dup = any(
+            len(words & seen) / len(words | seen) >= threshold
+            for seen in kept_words
+            if words | seen
+        )
+        if not is_dup:
+            kept.append(claim)
+            kept_words.append(words)
+    return kept
+
+
+def _is_junk_bullet(text: str) -> bool:
+    """True if a bullet is a PDF artifact with no informational value."""
+    stripped = text.strip()
+    # Stub: company name + ticker + ellipsis, nothing else
+    if _STUB_BULLET_RE.match(stripped):
+        return True
+    # Literal TICKER placeholder from PDF comparison tables (e.g. "referred to TICKER APP in Q4")
+    if _re.search(r'\bTICKER\b', stripped):
+        return True
+    # Extremely short and uninformative (< 20 chars)
+    if len(stripped) < 20:
+        return True
+    return False
+
+
+# ------------------------------------------------------------------
 # Section 1: Objective Breaking News
 # ------------------------------------------------------------------
 
@@ -96,21 +153,30 @@ def _render_section1(claims: List[ClaimOutput]) -> str:
         time_order = {'breaking': 0, 'upcoming': 1, 'ongoing': 2}
         ticker_group.sort(key=lambda c: time_order.get(c.time_sensitivity, 3))
 
+        # Dedup near-identical bullets (e.g. same data point covered by two Goldman reports)
+        ticker_group = _dedup_claims(ticker_group)
+
         # Split: high-alert claims always shown (uncapped); regular claims capped
         high_alert = [c for c in ticker_group if _is_high_alert(c)]
         regular = [c for c in ticker_group if not _is_high_alert(c)]
         regular_cap = max(0, MAX_CLAIMS_PER_TICKER - len(high_alert))
 
-        lines.append(f"**{ticker}**")
+        rendered = []
         for claim in high_alert:
             bullet = claim.bullets[0]
-            lines.append(f"- ⚠ {bullet}")
-            lines.append(f"  *— {claim.source_citation}*")
+            if not _is_junk_bullet(bullet):
+                rendered.append(f"- ⚠ {bullet}\n  *— {claim.source_citation}*")
         for claim in regular[:regular_cap]:
             bullet = claim.bullets[0]
-            lines.append(f"- {bullet}")
-            lines.append(f"  *— {claim.source_citation}*")
-        lines.append("")
+            if not _is_junk_bullet(bullet):
+                rendered.append(f"- {bullet}\n  *— {claim.source_citation}*")
+
+        if rendered:
+            lines.append(f"**{ticker}**")
+            lines.extend(rendered)
+            lines.append("")
+        else:
+            lines.append(f"**{ticker}** — No Update\n")
 
     # --- TMT Sector Sub-section ---
     if sector_claims:

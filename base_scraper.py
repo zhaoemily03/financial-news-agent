@@ -172,6 +172,45 @@ from selenium.webdriver.support import expected_conditions as EC
 from dateutil import parser as dateparser
 import config as _cfg
 
+# Excel MIME types — signals a spreadsheet/model download, not a research report
+_EXCEL_MIME_TYPES = {
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-excel.sheet.macroenabled',
+    'application/vnd.ms-excel.sheet.binary',
+}
+
+# URL suffixes that indicate Excel files
+_EXCEL_URL_SUFFIXES = ('.xlsx', '.xls', '.xlsm', '.xlsb', '.csv')
+
+# Title patterns that reliably indicate a financial model spreadsheet (not a narrative report)
+_MODEL_TITLE_PATTERNS = re.compile(
+    r'\b(company model|model update|earnings model|financial model|comp model|'
+    r'valuation model|dcf model|price target model)\b',
+    re.IGNORECASE
+)
+
+
+def is_model_document(title: str, url: str = '', content_type: str = '') -> bool:
+    """
+    Returns True if a document is a spreadsheet/model that should be skipped.
+
+    Checks (in order):
+      1. Content-type header contains an Excel MIME type
+      2. URL ends with an Excel file suffix
+      3. Title matches known financial-model naming patterns
+    """
+    if content_type:
+        ct = content_type.lower()
+        if any(m in ct for m in _EXCEL_MIME_TYPES):
+            return True
+    if url:
+        if url.lower().split('?')[0].endswith(_EXCEL_URL_SUFFIXES):
+            return True
+    if title and _MODEL_TITLE_PATTERNS.search(title):
+        return True
+    return False
+
 
 class BaseScraper(ABC):
     """
@@ -461,6 +500,10 @@ class BaseScraper(ABC):
                 response = self.session.get(url, timeout=_cfg.REQUEST_TIMEOUT)
 
                 if response.status_code == 200 and len(response.content) > 1000:
+                    ct = response.headers.get('content-type', '')
+                    if is_model_document('', url, ct):
+                        print(f"    Skipping Excel/spreadsheet download")
+                        return None
                     print(f"    Downloaded PDF ({len(response.content)} bytes)")
                     return response.content
 
@@ -678,6 +721,14 @@ class BaseScraper(ABC):
             skipped = len(recent) - len(new_reports)
             if skipped:
                 print(f"  Skipped {skipped} previously processed reports")
+
+            # Skip model spreadsheets (Excel files, comp models) — not narrative research
+            before = len(new_reports)
+            new_reports = [r for r in new_reports
+                           if not is_model_document(r.get('title', ''), r.get('url', ''))]
+            if len(new_reports) < before:
+                print(f"  Skipped {before - len(new_reports)} model/spreadsheet documents")
+
             print(f"  -> {len(new_reports)} new reports to process")
 
             if not new_reports:

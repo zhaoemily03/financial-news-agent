@@ -536,7 +536,7 @@ def generate_implications_narrative(
             {"role": "user", "content": '\n'.join(lines)},
         ],
         temperature=0.4,
-        max_tokens=400,  # ~250 words
+        max_tokens=600,  # ~450 words — 400 was cutting off mid-sentence
     )
 
 

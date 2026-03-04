@@ -37,14 +37,19 @@ except ImportError:
 
 MACRO_RSS_FEEDS = [
     {
-        'name': 'Reuters Business',
-        'url': 'https://www.rss.reuters.com/news/businessNews',
-        'source': 'Reuters',
+        'name': 'Financial Times World',
+        'url': 'https://www.ft.com/world?format=rss',
+        'source': 'FT',
     },
     {
         'name': 'CNBC Top News',
         'url': 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114',
         'source': 'CNBC',
+    },
+    {
+        'name': 'Yahoo Finance',
+        'url': 'https://finance.yahoo.com/rss/topstories',
+        'source': 'Yahoo Finance',
     },
 ]
 
@@ -62,6 +67,16 @@ HIGH_PRIORITY_KEYWORDS = [
 
     # Tariffs / Trade War (hits hardware margins and supply chains directly)
     'tariff', 'trade war', 'trade restriction',
+
+    # US-China Hegemony / Geopolitical Flashpoints
+    'iran', 'israel', 'middle east', 'strait of hormuz',
+    'ukraine', 'russia sanctions', 'military strike', 'armed conflict',
+    'geopolit', 'escalat',
+
+    # Supply Chain Reshoring / Onshoring (US-China decoupling in action)
+    'onshoring', 'reshoring', 'nearshoring', 'friend-shoring',
+    'supply chain repatriation', 'domestic chip', 'domestic manufacturing',
+    'supply chain', 'chip factory', 'fab ',
 
     # TMT-Specific Regulation & Disruption
     'antitrust', 'doj', 'ftc', 'sec ', 'ai regulation',
@@ -83,9 +98,6 @@ LOWER_PRIORITY_KEYWORDS = [
 
     # US Political Risk
     'executive order', 'government shutdown', 'debt ceiling', 'election',
-
-    # Supply Chain
-    'supply chain', 'reshoring', 'domestic manufacturing',
 
     # Macro Backdrop
     'inflation', 'cpi', 'gdp', 'recession', 'unemployment',

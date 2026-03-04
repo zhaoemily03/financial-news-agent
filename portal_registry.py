@@ -269,6 +269,18 @@ def _auto_register():
     except ImportError:
         pass
 
+    try:
+        from jpmorgan_scraper import JPMorganScraper
+        registry.register('jpmorgan', JPMorganScraper)
+    except ImportError:
+        pass
+
+    try:
+        from wells_fargo_scraper import WellsFargoScraper
+        registry.register('wells_fargo', WellsFargoScraper)
+    except ImportError:
+        pass
+
 
 # Run auto-registration on module import
 _auto_register()

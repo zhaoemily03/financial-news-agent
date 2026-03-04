@@ -40,12 +40,17 @@ def auth_status():
     PORTAL_DISPLAY = {
         'jefferies': 'Jefferies',
         'morgan_stanley': 'Morgan Stanley',
+        'jpmorgan': 'J.P. Morgan',
         'goldman': 'Goldman Sachs',
         'bernstein': 'Bernstein',
         'arete': 'Arete',
         'ubs': 'UBS',
         'macquarie': 'Macquarie',
+        'wells_fargo': 'Wells Fargo',
     }
+
+    # Tier 4 portals (2FA) — require interactive login, not just credential update
+    TIER4_PORTALS = {'jefferies', 'morgan_stanley', 'jpmorgan', 'macquarie', 'wells_fargo'}
 
     return render_template_string('''
     {% for s in failed %}
@@ -58,15 +63,21 @@ def auth_status():
           <input type="text" name="verify_link" placeholder="https://login.matrix.ms.com/..." style="flex:1;min-width:300px">
           <button type="submit">Submit</button>
         </form>
+      {% elif s.portal in tier4 %}
+        <p>This portal uses 2FA. Run the following command in your terminal to re-authenticate:</p>
+        <code style="display:block;padding:6px 10px;background:#1a1a1a;border-radius:4px;margin:6px 0">
+          python refresh_cookies.py --interactive {{ s.portal }}
+        </code>
+        <p>A browser window will open. Log in, and cookies will be saved automatically.</p>
       {% else %}
-        <p>Re-authenticate by opening the portal and logging in, or update credentials in
+        <p>Update credentials in
            <a href="/settings#portal-credentials">Settings → Portal Credentials</a>.
-           The scraper will pick up the new session automatically on the next run.</p>
+           The scraper will pick up the new session on the next run.</p>
       {% endif %}
       {% if s.last_success %}<p class="muted">Last success: {{ s.last_success[:10] }}</p>{% endif %}
     </div>
     {% endfor %}
-    ''', failed=failed, labels=PORTAL_DISPLAY)
+    ''', failed=failed, labels=PORTAL_DISPLAY, tier4=TIER4_PORTALS)
 
 
 @bp.route('/reauth/<portal>/verify', methods=['POST'])

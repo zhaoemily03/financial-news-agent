@@ -32,37 +32,43 @@ def refresh_portal_cookies(portal_name: str, headless: bool = True) -> bool:
         print(f"  {portal_name}: disabled in config, skipping")
         return True
 
-    scraper = None
     try:
-        # Import and instantiate the scraper
         if portal_name == 'jefferies':
             from jefferies_scraper import JefferiesScraper
             scraper = JefferiesScraper(headless=headless)
+            if scraper._init_driver():
+                print(f"  {portal_name}: session valid, cookies refreshed")
+                scraper.close_driver()
+                return True
+            scraper.close_driver()
+            print(f"  {portal_name}: SESSION EXPIRED - manual re-auth required")
+            return False
         elif portal_name == 'morgan_stanley':
             from morgan_stanley_scraper import MorganStanleyScraper
             scraper = MorganStanleyScraper(headless=headless)
+            if scraper._init_driver():
+                print(f"  {portal_name}: session valid, cookies refreshed")
+                scraper.close_driver()
+                return True
+            scraper.close_driver()
+            print(f"  {portal_name}: SESSION EXPIRED - manual re-auth required")
+            return False
+        elif portal_name == 'jpmorgan':
+            # Tier 4 (2FA) — persistent Chrome profile handles session automatically.
+            # If session alive: done silently. If expired: user logs in once.
+            from jpmorgan_scraper import JPMorganScraper
+            scraper = JPMorganScraper()
+            driver = scraper._get_driver(headless=False)
+            try:
+                return scraper._authenticate(driver)
+            finally:
+                driver.quit()
         else:
             print(f"  {portal_name}: no scraper implemented")
             return True
 
-        # Initialize driver (loads cookies, navigates to portal, checks auth)
-        if scraper._init_driver():
-            print(f"  {portal_name}: session valid, cookies refreshed")
-            scraper.close_driver()
-            return True
-        else:
-            print(f"  {portal_name}: SESSION EXPIRED - manual re-auth required")
-            if scraper:
-                scraper.close_driver()
-            return False
-
     except Exception as e:
         print(f"  {portal_name}: error - {e}")
-        if scraper:
-            try:
-                scraper.close_driver()
-            except:
-                pass
         return False
 
 

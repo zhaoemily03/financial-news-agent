@@ -141,6 +141,20 @@ SOURCES = {
         'max_reports': 20,
         'scraper_class': 'MacquarieScraper',
     },
+    'jpmorgan': {
+        'enabled': False,  # Enable after testing login flow
+        'portal_url': 'https://markets.jpmorgan.com/#home',
+        'login_required': True,
+        'uses_followed_notifications': True,  # Uses /contentfeed/publicationDocuments
+        'max_reports': 25,
+        'scraper_class': 'JPMorganScraper',
+    },
+    'wells_fargo': {
+        'enabled': True,
+        'login_required': True,
+        'max_reports': 25,
+        'scraper_class': 'WellsFargoScraper',
+    },
     # Non-portal sources (separate ingestion pipeline)
     'substack': {
         'enabled': True,

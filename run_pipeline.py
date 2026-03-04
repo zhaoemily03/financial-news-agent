@@ -8,6 +8,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -489,18 +490,24 @@ def stage_2_normalize(reports: List[Dict], stats: PipelineStats) -> List[Tuple[D
 TMT_PREFILTER_KEYWORDS = [
     'AI', 'artificial intelligence', 'cloud', 'SaaS', 'cybersecurity',
     'ad revenue', 'advertising', 'streaming', 'semiconductor', 'LLM',
-    'data center', 'machine learning', 'software', 'digital', 'tech',
-    'internet', 'social media', 'e-commerce', 'ecommerce',
-    'gaming', 'fintech', 'payments', 'zero trust', 'endpoint',
+    'data center', 'machine learning', 'software', 'tech',
+    'social media', 'e-commerce', 'ecommerce',
+    'gaming', 'fintech', 'zero trust', 'endpoint',
 ]
 
-# Title-level signals that indicate traditional auto/industrial content with no meaningful TMT angle.
-# Applied only when no tracked ticker is present — prevents auto sector reports from passing on
-# generic 'tech' or 'digital' keywords alone.
+# Precompiled word-boundary patterns — prevents 'tech' matching inside 'technology',
+# 'software' matching 'softwarehaus', etc. Avoids false positives from banking/finance docs.
+_TMT_KW_PATTERNS = [re.compile(r'\b' + re.escape(kw.lower()) + r'\b') for kw in TMT_PREFILTER_KEYWORDS]
+
+# Title-level signals that indicate non-TMT content with no meaningful portfolio angle.
+# Applied only when no tracked ticker is present.
 AUTO_SECTOR_TITLE_TERMS = [
+    # Auto/industrial sector
     'auto dealer', 'auto dealership', 'car dealer', 'dealership scorecard',
     'auto parts', 'auto supplier', 'auto monitor', 'vehicle sales',
     'auto scorecard', 'dealer scorecard',
+    # Generic accounting/regulatory documents (e.g. central bank annual reports)
+    'profit and loss', 'financial statements', 'annual accounts', 'balance sheet',
 ]
 
 PASSTHROUGH_SOURCES = {'podcast', 'macro_news', 'substack'}
@@ -538,7 +545,7 @@ def stage_2b_prefilter(
                          text_to_scan_upper.startswith(f'{t}:')
                          for t in ticker_set)
 
-        has_tmt_keyword = any(kw.lower() in text_to_scan_lower for kw in TMT_PREFILTER_KEYWORDS)
+        has_tmt_keyword = any(pat.search(text_to_scan_lower) for pat in _TMT_KW_PATTERNS)
 
         # Drop auto/industrial sector docs that have no tracked ticker — they pass on
         # generic TMT keywords ('tech', 'digital') but carry no portfolio-relevant signal.
@@ -601,15 +608,31 @@ def stage_4_classify_and_filter(
     total_discarded = 0
 
     for doc, chunks in chunked:
-        print(f"  Classifying {len(chunks)} chunks from: {doc.title[:40]}...")
-        classifications = classify_chunks(
-            chunks, doc,
-            tracked_tickers=tracked_tickers,
-            investment_themes=investment_themes,
-        )
-
-        # Filter irrelevant
-        kept_chunks, kept_clfs, discarded = filter_irrelevant(chunks, classifications)
+        # macro_news is pre-filtered by keyword at collection — skip LLM classifier,
+        # assign macro category directly so geopolitical stories aren't dropped for
+        # lacking explicit tech references in the headline.
+        if doc.source == 'macro_news':
+            from classifier import ChunkClassification
+            classifications = [
+                ChunkClassification(
+                    chunk_id=ch.chunk_id,
+                    category='macro',
+                    content_type='fact',
+                    polarity='neutral',
+                )
+                for ch in chunks
+            ]
+            kept_chunks, kept_clfs, discarded = chunks, classifications, 0
+            print(f"  ✓ macro_news passthrough: {len(chunks)} chunks → macro (no LLM)")
+        else:
+            print(f"  Classifying {len(chunks)} chunks from: {doc.title[:40]}...")
+            classifications = classify_chunks(
+                chunks, doc,
+                tracked_tickers=tracked_tickers,
+                investment_themes=investment_themes,
+            )
+            # Filter irrelevant
+            kept_chunks, kept_clfs, discarded = filter_irrelevant(chunks, classifications)
         total_chunks += len(chunks)
         total_kept += len(kept_chunks)
         total_discarded += discarded
@@ -617,8 +640,8 @@ def stage_4_classify_and_filter(
         if discarded:
             print(f"    Filtered: {len(chunks)} → {len(kept_chunks)} ({discarded} irrelevant dropped)")
 
-        # Keyword gate: sell-side macro chunks must match MACRO_KEYWORDS before claim extraction.
-        # RSS/podcast/Substack are exempt — already keyword-filtered at collection.
+        # Sell-side macro gating: keyword filter then re-route to tmt_sector.
+        # RSS/podcast/Substack are exempt — keyword-filtered at collection; macro stays as macro.
         if doc.source in SELL_SIDE_SOURCES:
             text_lower = lambda ch: ch.text.lower()
             pairs = [
@@ -631,6 +654,17 @@ def stage_4_classify_and_filter(
                 kept_clfs   = [p[1] for p in pairs]
                 total_kept -= macro_gated
                 print(f"    Macro keyword gate: {macro_gated} sell-side macro chunk(s) dropped (no TMT keywords)")
+
+            # Section 3 only accepts macro from news wires (Reuters/CNBC).
+            # Re-route surviving sell-side macro → tmt_sector so it surfaces in Section 1.
+            rerouted = sum(1 for clf in kept_clfs if clf.category == 'macro')
+            for clf in kept_clfs:
+                if clf.category == 'macro':
+                    clf.category = 'tmt_sector'
+                    if not clf.tmt_subtopic:
+                        clf.tmt_subtopic = 'cloud_enterprise_software'
+            if rerouted:
+                print(f"    Section 3 gate: {rerouted} sell-side macro chunk(s) → tmt_sector")
 
         if kept_chunks:
             results.append((doc, kept_chunks, kept_clfs))

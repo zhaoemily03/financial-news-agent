@@ -57,7 +57,7 @@ Collect → Normalize → Pre-filter → Chunk → Classify+Filter → Claims+So
 | 2. **Normalize** | `normalizer.py` | No | Convert to structured `Document` objects |
 | 2b. **Pre-filter** | `run_pipeline.py` | No | Drop non-TMT docs by ticker/keyword before LLM |
 | 3. **Chunk** | `chunker.py` | No | Split into atomic units (~500 tokens) |
-| 4. **Classify+Filter** | `classifier.py` | **Yes** | 4-category classification + `filter_irrelevant()`. Off-coverage `tracked_ticker` chunks downgrade to `tmt_sector`. |
+| 4. **Classify+Filter** | `classifier.py` | **Yes** | 4-category classification + `filter_irrelevant()`. Off-coverage `tracked_ticker` chunks downgrade to `tmt_sector`. `macro_news` source bypasses LLM classifier — chunks assigned `macro` directly from keyword gate. Sell-side `macro` chunks re-routed to `tmt_sector` — Section 3 only accepts news wire macro. |
 | 5. **Claims+Sort** | `claim_extractor.py` | **Yes** | Extract atomic claims + `sort_claims_by_priority()` (no cap; high-alert always shown) |
 | 5b. **File Claims** | `claim_tracker.py` | No | Store claims in SQLite for historical tracking |
 | 5c. **Drift Detect** | `drift_detector.py` | No | Compare today's claims against history for belief shifts |
@@ -119,8 +119,11 @@ The V3 briefing uses a **4-section purpose-driven layout**. Claims are routed by
 - **⚑ Potential Implications subsection**: second-pass LLM call through a secondaries analyst lens — surfaces comp dynamics, liquidity timing, and information asymmetry signals. Explicitly flagged as model-generated interpretation.
 
 ### Section 3: Macro Connections
-- Deduplicated macro claims (cross-feed duplicate detection in `macro_news.py`)
-- LLM-generated TMT linkage narrative via `section3_synthesizer.py`
+- **Sources: FT World, CNBC, Yahoo Finance RSS only** — sell-side macro analysis is explicitly excluded. Sell-side chunks classified as `macro` are re-routed to `tmt_sector` and surface in Section 1 instead.
+- `macro_news` bypasses the LLM classifier — geopolitical stories pass through without requiring explicit tech references in the headline. The keyword gate at collection (`HIGH_PRIORITY_KEYWORDS`) is the filter.
+- Organizing lens: **US-China competition for technological and economic hegemony** — supply chain reshoring, sanctions, export controls, geopolitical flashpoints, energy/dollar effects on portfolio names.
+- LLM filter (`filter_macro_claims_by_tmt_relevance`) scores each claim for genuine TMT-disruption potential before synthesis. Logs [KEEP]/[DROP] per claim. Capped at 8 claims.
+- LLM narrative (`section3_synthesizer.py`) maps surviving signals to specific portfolio names via China/Asia revenue, hardware supply chain, or semiconductor dependencies. Frames secondaries positioning implications explicitly.
 
 ### Section 4: Longitudinal Delta Detection
 - Deterministic, no LLM — compares claim metadata across 7d/30d/90d windows
@@ -214,7 +217,8 @@ The system uses a **PortalRegistry** to manage multiple sell-side research porta
 
 | Source | Status | Notes |
 |--------|--------|-------|
-| JP Morgan | 🔲 Not yet implemented | Enable in `config.py`, implement `jpmorgan_scraper.py` |
+| **JP Morgan** | 🔲 In progress | `jpmorgan_scraper.py` implemented; feed API endpoint unconfirmed — needs CDP discovery during interactive login |
+| **Wells Fargo** | 🔲 In progress | `wells_fargo_scraper.py` implemented; BlueMatrix SPA, same pattern as Jefferies |
 
 ### Adding a New Portal
 
@@ -357,7 +361,7 @@ financial-news-agent/
 ├── normalizer.py            # Raw content → Document (all sources)
 ├── chunker.py               # Document → Chunks (~500 tokens)
 ├── classifier.py            # 4-category classification + filter_irrelevant() (LLM)
-├── macro_news.py            # RSS macro news collection (Reuters, CNBC)
+├── macro_news.py            # RSS macro news collection (FT, CNBC, Yahoo Finance)
 │
 ├── # Claims & Drift
 ├── claim_extractor.py       # Chunk → atomic claims + sort_claims_by_priority() (LLM)
@@ -383,6 +387,8 @@ financial-news-agent/
 ├── bernstein_scraper.py     # Bernstein Research scraper
 ├── ubs_scraper.py           # UBS scraper
 ├── arete_scraper.py         # Arete Research scraper
+├── jpmorgan_scraper.py      # JP Morgan scraper (Tier 4, 2FA)
+├── wells_fargo_scraper.py   # Wells Fargo scraper (BlueMatrix SPA)
 ├── cookie_manager.py        # Cookie persistence per portal
 ├── report_tracker.py        # SQLite deduplication
 │
@@ -456,7 +462,7 @@ Dynamically determined by who you follow in each portal ("Followed Notifications
 - [x] Sentiment drift detection (confidence shifts, belief flips, new disagreement)
 - [x] Automated cookie refresh (launchd - runs at login + every 6 hours)
 - [x] Daily briefing automation (launchd - 7 AM daily)
-- [x] Macro news collection (Reuters, CNBC via RSS)
+- [x] Macro news collection (FT, CNBC, Yahoo Finance via RSS — Reuters dead, replaced with FT World)
 - [x] Document-level pre-filter (save LLM calls on non-TMT docs)
 - [ ] Jefferies scraping (auth issues — SSO cookies expire frequently)
 - [x] Section 3: Macro Connections (macro claims + LLM TMT linkage via `section3_synthesizer.py`)

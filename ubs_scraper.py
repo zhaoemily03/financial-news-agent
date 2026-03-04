@@ -16,7 +16,7 @@ import time
 from datetime import datetime
 from typing import List, Dict, Optional
 
-from base_scraper import BaseScraper
+from base_scraper import BaseScraper, is_model_document
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium import webdriver
@@ -278,7 +278,7 @@ class UBSScraper(BaseScraper):
                     continue
 
                 # Skip financial model spreadsheets — not narrative research
-                if 'Company Model' in title:
+                if is_model_document(title):
                     continue
 
                 # Walk up to find card container with date + analyst
